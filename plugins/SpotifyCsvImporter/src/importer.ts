@@ -98,12 +98,13 @@ const chunks = <T>(items: T[], size: number) => {
 	return result;
 };
 
-const tidalWrite = async <T>(url: string, body: URLSearchParams): Promise<T> => {
+const tidalWrite = async <T>(url: string, body: URLSearchParams, extraHeaders: Record<string, string> = {}): Promise<T> => {
 	const response = await fetch(url, {
 		method: "POST",
 		headers: {
 			...(await TidalApi.getAuthHeaders()),
 			"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+			...extraHeaders,
 		},
 		body,
 	});
@@ -113,6 +114,16 @@ const tidalWrite = async <T>(url: string, body: URLSearchParams): Promise<T> => 
 	}
 	if (response.status === 204) return undefined as T;
 	return response.json() as Promise<T>;
+};
+
+const getPlaylistWriteState = async (playlistUuid: string) => {
+	const response = await fetch(`https://desktop.tidal.com/v1/playlists/${playlistUuid}?${TidalApi.queryArgs()}`, {
+		headers: await TidalApi.getAuthHeaders(),
+	});
+	if (!response.ok) throw new Error(`TIDAL API ${response.status} ${response.statusText} while reading playlist ETag`);
+	const etag = response.headers.get("etag");
+	if (!etag) throw new Error("TIDAL did not return the playlist ETag required for writing");
+	return { playlist: (await response.json()) as redux.Playlist, etag };
 };
 
 const createPlaylist = async (title: string, trackIds: string[], onProgress: (added: number) => void) => {
@@ -129,14 +140,16 @@ const createPlaylist = async (title: string, trackIds: string[], onProgress: (ad
 	let added = 0;
 	for (const ids of chunks(trackIds, 100)) {
 		if (cancelRequested) break;
+		const { playlist: currentPlaylist, etag } = await getPlaylistWriteState(playlist.uuid);
 		await tidalWrite<void>(
 			`https://desktop.tidal.com/v1/playlists/${playlist.uuid}/items?${TidalApi.queryArgs()}`,
 			new URLSearchParams({
 				trackIds: ids.join(","),
-				toIndex: String(added),
+				toIndex: String(currentPlaylist.numberOfTracks),
 				onDupes: "ADD",
 				onArtifactNotFound: "SKIP",
 			}),
+			{ "If-None-Match": etag },
 		);
 		added += ids.length;
 		onProgress(added);
