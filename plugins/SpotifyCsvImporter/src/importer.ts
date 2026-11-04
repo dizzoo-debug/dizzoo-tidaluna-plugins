@@ -98,22 +98,41 @@ const chunks = <T>(items: T[], size: number) => {
 	return result;
 };
 
+const waitForCreatedPlaylist = (title: string, existingUuids: Set<string>) =>
+	new Promise<redux.Playlist>((resolve, reject) => {
+		let settled = false;
+		let unsubscribe = () => {};
+		const finish = (playlist?: redux.Playlist, error?: Error) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timeout);
+			unsubscribe();
+			if (playlist) resolve(playlist);
+			else reject(error ?? new Error(`TIDAL did not create playlist "${title}"`));
+		};
+		const check = () => {
+			const playlist = Object.values(redux.store.getState().content.playlists).find(
+				(item) => item.title === title && !existingUuids.has(item.uuid),
+			);
+			if (playlist) finish(playlist);
+		};
+		const timeout = setTimeout(
+			() => finish(undefined, new Error(`Timed out while waiting for TIDAL to create playlist "${title}"`)),
+			60_000,
+		);
+		unsubscribe = redux.store.subscribe(check);
+		check();
+	});
+
 const createPlaylist = async (title: string, trackIds: string[], onProgress: (added: number) => void) => {
-	const response = await redux.interceptActionResp(
-		() =>
-			redux.actions["folders/CREATE_PLAYLIST"]({
-				description: "Imported from a Spotify CSV export by Spotify CSV Importer",
-				folderId: "root",
-				fromPlaylist: undefined,
-				title,
-			}),
-		unloads,
-		["content/LOAD_PLAYLIST_SUCCESS", "content/ADD_PLAYLISTS"],
-		["content/LOAD_PLAYLIST_FAIL"],
-		{ timeoutMs: 60_000 },
-	) as { playlist?: redux.Playlist; playlists?: redux.Playlist[] };
-	const playlist = response.playlist ?? response.playlists?.find((item) => item.title === title) ?? response.playlists?.[0];
-	if (!playlist?.uuid) throw new Error(`TIDAL did not return a UUID for playlist "${title}"`);
+	const existingUuids = new Set(Object.keys(redux.store.getState().content.playlists));
+	const createdPlaylist = waitForCreatedPlaylist(title, existingUuids);
+	redux.actions["folders/CREATE_PLAYLIST"]({
+		description: "Imported from a Spotify CSV export by Spotify CSV Importer",
+		fromPlaylist: undefined,
+		title,
+	});
+	const playlist = await createdPlaylist;
 
 	let added = 0;
 	for (const ids of chunks(trackIds, 100)) {
