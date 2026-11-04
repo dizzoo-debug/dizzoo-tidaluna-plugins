@@ -1,7 +1,7 @@
 {
 	"name": "Spotify CSV Importer",
 	"description": "Import Spotify CSV exports as TIDAL playlists, with optional My Collection favorites.",
-	"homepage": "https://github.com/Dizzoo/dizzoo-tidaluna-plugins/tree/master/plugins/SpotifyCsvImporter",
+	"homepage": "https://github.com/dizzoo-debug/dizzoo-tidaluna-plugins/tree/master/plugins/SpotifyCsvImporter",
 	"author": {
 		"name": "Dizzoo"
 	},

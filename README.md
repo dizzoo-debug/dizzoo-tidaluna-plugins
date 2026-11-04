@@ -10,7 +10,7 @@ desktop client mod: **Song Downloader Deluxe** and **Spotify CSV Importer**.
 3. Add this store URL:
 
    ```text
-   https://github.com/Dizzoo/dizzoo-tidaluna-plugins/releases/download/latest/store.json
+   https://github.com/dizzoo-debug/dizzoo-tidaluna-plugins/releases/download/latest/store.json
    ```
 
 4. Install and enable the plugins you want.

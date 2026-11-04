@@ -8,9 +8,9 @@ const store = {
 	description: "Song Downloader Deluxe and Spotify CSV Importer for TidaLuna.",
 	author: {
 		name: "Dizzoo",
-		url: "https://github.com/Dizzoo",
+		url: "https://github.com/dizzoo-debug",
 	},
-	homepage: "https://github.com/Dizzoo/dizzoo-tidaluna-plugins",
+	homepage: "https://github.com/dizzoo-debug/dizzoo-tidaluna-plugins",
 	type: "module",
 	plugins: generated.plugins,
 };
