@@ -8,15 +8,23 @@ import { trace } from "./runtime";
 
 export const settings = await ReactiveStore.getPluginStorage("SpotifyCsvImporter", {
 	addToCollection: false,
+	preferOriginalAlbums: true,
+	mergeIntoExisting: false,
+	replaceVersions: true,
 });
 
 const progressText = (progress: ImportProgress) => {
 	const file = `${progress.fileIndex + 1}/${progress.fileCount} ${progress.fileName}`;
 	switch (progress.stage) {
 		case "matching":
-			return `${file}: matching ${progress.processed}/${progress.total}`;
+			return (
+				`${file}: matching ${progress.processed}/${progress.total}` +
+				(progress.waitSeconds ? ` (TIDAL rate limit, waiting ${progress.waitSeconds}s)` : "")
+			);
 		case "creating":
-			return `${file}: creating playlist`;
+			return `${file}: preparing playlist`;
+		case "replacing":
+			return `${file}: replacing versions ${progress.processed}/${progress.total}`;
 		case "adding":
 			return `${file}: adding ${progress.processed}/${progress.total}`;
 		case "collection":
@@ -30,6 +38,9 @@ const progressText = (progress: ImportProgress) => {
 
 export const Settings = () => {
 	const [addToCollection, setAddToCollection] = React.useState(settings.addToCollection);
+	const [preferOriginalAlbums, setPreferOriginalAlbums] = React.useState(settings.preferOriginalAlbums);
+	const [mergeIntoExisting, setMergeIntoExisting] = React.useState(settings.mergeIntoExisting);
+	const [replaceVersions, setReplaceVersions] = React.useState(settings.replaceVersions);
 	const [running, setRunning] = React.useState(false);
 	const [status, setStatus] = React.useState(
 		"Runtime playlist-api-v8. Select one or more Spotify CSV files. Each file becomes one TIDAL playlist.",
@@ -50,7 +61,7 @@ export const Settings = () => {
 
 		setRunning(true);
 		try {
-			const summaries = await importCsvFiles(selection.filePaths, addToCollection, (progress) => setStatus(progressText(progress)));
+			const summaries = await importCsvFiles(selection.filePaths, { addToCollection, preferOriginalAlbums, mergeIntoExisting, replaceVersions }, (progress) => setStatus(progressText(progress)));
 			const matched = summaries.reduce((sum, item) => sum + item.matched, 0);
 			const unmatched = summaries.reduce((sum, item) => sum + item.unmatched, 0);
 			setStatus(`Finished: ${summaries.length} playlist(s), ${matched} matched, ${unmatched} unmatched.`);
@@ -69,6 +80,25 @@ export const Settings = () => {
 				desc="When enabled, every matched track is also added to your TIDAL My Collection. Off by default."
 				checked={addToCollection}
 				onChange={(_: unknown, checked: boolean) => setAddToCollection((settings.addToCollection = checked))}
+			/>
+			<LunaSwitchSetting
+				title="Prefer original albums over compilations"
+				desc="Checks every TIDAL release of the same recording (ISRC) and picks the artist's own album matching the Spotify album, instead of a compilation or Various Artists release. Slower: more TIDAL lookups per track."
+				checked={preferOriginalAlbums}
+				onChange={(_: unknown, checked: boolean) => setPreferOriginalAlbums((settings.preferOriginalAlbums = checked))}
+			/>
+			<LunaSwitchSetting
+				title="Add to existing playlist with the same name"
+				desc="If you already have a playlist named like the CSV file, only the tracks it is missing are appended to it. Otherwise a new playlist is created."
+				checked={mergeIntoExisting}
+				onChange={(_: unknown, checked: boolean) => setMergeIntoExisting((settings.mergeIntoExisting = checked))}
+			/>
+			<LunaSwitchSetting
+				title="Replace other versions in the existing playlist"
+				desc="When adding to an existing playlist, a track that is there in another version (e.g. from a compilation or mixtape) is swapped in place for the newly matched one, and extra copies of that track in other versions are removed. Tracks not in the CSV are left alone."
+				checked={replaceVersions}
+				disabled={!mergeIntoExisting}
+				onChange={(_: unknown, checked: boolean) => setReplaceVersions((settings.replaceVersions = checked))}
 			/>
 			<LunaButtonSetting
 				title="Import Spotify CSV playlists"
