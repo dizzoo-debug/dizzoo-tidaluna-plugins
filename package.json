@@ -1,0 +1,34 @@
+{
+	"name": "@dizzoo/tidaluna-plugins",
+	"description": "Song Downloader Deluxe and Spotify CSV Importer for TidaLuna.",
+	"author": {
+		"name": "Dizzoo",
+		"url": "https://github.com/Dizzoo"
+	},
+	"homepage": "https://github.com/Dizzoo/dizzoo-tidaluna-plugins",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/Dizzoo/dizzoo-tidaluna-plugins.git"
+	},
+	"type": "module",
+	"scripts": {
+		"watch": "concurrently npm:esWatch npm:serve",
+		"build": "rimraf ./dist && tsx esbuild.config.ts && node scripts/finalizeStore.mjs",
+		"esWatch": "rimraf ./dist && tsx ./esbuild.config.ts --watch",
+		"serve": "http-server ./dist -p 3000 -s --cors -c-1"
+	},
+	"devDependencies": {
+		"@inrixia/helpers": "^3.21.2",
+		"@types/node": "^25.0.10",
+		"@types/react": "^19.2.9",
+		"@types/react-dom": "^19.2.3",
+		"concurrently": "^9.2.1",
+		"electron": "^40.0.0",
+		"http-server": "^14.1.1",
+		"luna": "github:Inrixia/TidaLuna",
+		"oby": "^15.1.2",
+		"rimraf": "^6.1.2",
+		"tsx": "^4.21.0",
+		"typescript": "^5.9.3"
+	}
+}

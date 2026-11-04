@@ -1,0 +1,12 @@
+{
+	"name": "Song Downloader Deluxe",
+	"description": "Advanced TIDAL downloads with Atmos separation, automatic Collection downloads, resumable queues, artwork, credits, and organized filenames.",
+	"homepage": "https://github.com/Dizzoo/dizzoo-tidaluna-plugins/tree/master/plugins/SongDownloaderDeluxe",
+	"author": {
+		"name": "Dizzoo"
+	},
+	"main": "./src/index.ts",
+	"dependencies": {
+		"sanitize-filename": "^1.6.3"
+	}
+}
