@@ -99,7 +99,7 @@ const chunks = <T>(items: T[], size: number) => {
 };
 
 const createPlaylist = async (title: string, trackIds: string[], onProgress: (added: number) => void) => {
-	const { playlist } = await redux.interceptActionResp(
+	const response = await redux.interceptActionResp(
 		() =>
 			redux.actions["folders/CREATE_PLAYLIST"]({
 				description: "Imported from a Spotify CSV export by Spotify CSV Importer",
@@ -108,10 +108,11 @@ const createPlaylist = async (title: string, trackIds: string[], onProgress: (ad
 				title,
 			}),
 		unloads,
-		["content/LOAD_PLAYLIST_SUCCESS"],
+		["content/LOAD_PLAYLIST_SUCCESS", "content/ADD_PLAYLISTS"],
 		["content/LOAD_PLAYLIST_FAIL"],
-		{ timeoutMs: 20_000 },
-	);
+		{ timeoutMs: 60_000 },
+	) as { playlist?: redux.Playlist; playlists?: redux.Playlist[] };
+	const playlist = response.playlist ?? response.playlists?.find((item) => item.title === title) ?? response.playlists?.[0];
 	if (!playlist?.uuid) throw new Error(`TIDAL did not return a UUID for playlist "${title}"`);
 
 	let added = 0;
