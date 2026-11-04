@@ -2,7 +2,7 @@ import { MediaItem, TidalApi, redux } from "@luna/lib";
 
 import { makeUnmatchedCsv, parseSpotifyCsv, type SpotifyTrackRow } from "./csv";
 import { readCsvFile, writeUnmatchedReport } from "./files.native";
-import { trace, unloads } from "./runtime";
+import { trace } from "./runtime";
 
 type SearchResponse = {
 	items?: redux.Track[];
@@ -98,58 +98,45 @@ const chunks = <T>(items: T[], size: number) => {
 	return result;
 };
 
-const waitForCreatedPlaylist = (title: string, existingUuids: Set<string>) =>
-	new Promise<redux.Playlist>((resolve, reject) => {
-		let settled = false;
-		let unsubscribe = () => {};
-		const finish = (playlist?: redux.Playlist, error?: Error) => {
-			if (settled) return;
-			settled = true;
-			clearTimeout(timeout);
-			unsubscribe();
-			if (playlist) resolve(playlist);
-			else reject(error ?? new Error(`TIDAL did not create playlist "${title}"`));
-		};
-		const check = () => {
-			const playlist = Object.values(redux.store.getState().content.playlists).find(
-				(item) => item.title === title && !existingUuids.has(item.uuid),
-			);
-			if (playlist) finish(playlist);
-		};
-		const timeout = setTimeout(
-			() => finish(undefined, new Error(`Timed out while waiting for TIDAL to create playlist "${title}"`)),
-			60_000,
-		);
-		unsubscribe = redux.store.subscribe(check);
-		check();
+const tidalWrite = async <T>(url: string, body: URLSearchParams): Promise<T> => {
+	const response = await fetch(url, {
+		method: "POST",
+		headers: {
+			...(await TidalApi.getAuthHeaders()),
+			"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+		},
+		body,
 	});
+	if (!response.ok) {
+		const details = (await response.text()).slice(0, 300);
+		throw new Error(`TIDAL API ${response.status} ${response.statusText}${details ? `: ${details}` : ""}`);
+	}
+	if (response.status === 204) return undefined as T;
+	return response.json() as Promise<T>;
+};
 
 const createPlaylist = async (title: string, trackIds: string[], onProgress: (added: number) => void) => {
-	const existingUuids = new Set(Object.keys(redux.store.getState().content.playlists));
-	const createdPlaylist = waitForCreatedPlaylist(title, existingUuids);
-	redux.actions["folders/CREATE_PLAYLIST"]({
-		description: "Imported from a Spotify CSV export by Spotify CSV Importer",
-		fromPlaylist: undefined,
-		title,
-	});
-	const playlist = await createdPlaylist;
+	const userId = redux.store.getState().user.meta.id;
+	const playlist = await tidalWrite<redux.Playlist>(
+		`https://desktop.tidal.com/v1/users/${userId}/playlists?${TidalApi.queryArgs()}`,
+		new URLSearchParams({
+			title,
+			description: "Imported from a Spotify CSV export by Spotify CSV Importer",
+		}),
+	);
+	if (!playlist?.uuid) throw new Error(`TIDAL did not return a UUID for playlist "${title}"`);
 
 	let added = 0;
 	for (const ids of chunks(trackIds, 100)) {
 		if (cancelRequested) break;
-		await redux.interceptActionResp(
-			() =>
-				redux.actions["content/ADD_MEDIA_ITEMS_TO_PLAYLIST"]({
-					addToIndex: -1,
-					mediaItemIdsToAdd: ids,
-					onDupes: "ADD",
-					playlistUUID: playlist.uuid!,
-					showNotification: false,
-				}),
-			unloads,
-			["content/ADD_MEDIA_ITEMS_TO_PLAYLIST_SUCCESS"],
-			["content/ADD_MEDIA_ITEMS_TO_PLAYLIST_FAIL"],
-			{ timeoutMs: 30_000 },
+		await tidalWrite<void>(
+			`https://desktop.tidal.com/v1/playlists/${playlist.uuid}/items?${TidalApi.queryArgs()}`,
+			new URLSearchParams({
+				trackIds: ids.join(","),
+				toIndex: String(added),
+				onDupes: "ADD",
+				onArtifactNotFound: "SKIP",
+			}),
 		);
 		added += ids.length;
 		onProgress(added);
