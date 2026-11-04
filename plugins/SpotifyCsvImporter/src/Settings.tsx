@@ -32,7 +32,7 @@ export const Settings = () => {
 	const [addToCollection, setAddToCollection] = React.useState(settings.addToCollection);
 	const [running, setRunning] = React.useState(false);
 	const [status, setStatus] = React.useState(
-		"Runtime playlist-api-v6. Select one or more Spotify CSV files. Each file becomes one TIDAL playlist.",
+		"Runtime playlist-api-v7. Select one or more Spotify CSV files. Each file becomes one TIDAL playlist.",
 	);
 
 	const startImport = async () => {

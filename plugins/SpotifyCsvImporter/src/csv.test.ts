@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 
-import { makeUnmatchedCsv, parseSpotifyCsv } from "./csv";
+import { makeUnmatchedCsv, makeUnmatchedText, parseSpotifyCsv } from "./csv";
 
 const sample = `\uFEFFTrack URI,ISRC,Track Name,Album Name,Artist Name(s),Duration (ms)\r\nspotify:track:1,AA111,"Song, One",Album,"Artist ""A""",123000\r\nspotify:track:2,,Second Song,Second Album,Second Artist,\r\n`;
 const rows = parseSpotifyCsv(sample);
@@ -14,6 +14,10 @@ assert.deepEqual(rows[0], {
 	durationMs: 123000,
 });
 assert.equal(rows[1].durationMs, undefined);
+const report = makeUnmatchedText([{ track: rows[0], reason: "Not found" }]);
+assert.match(report, /Tracks not matched in TIDAL: 1/);
+assert.match(report, /Artist "A" — Song, One/);
+assert.match(report, /Reason: Not found/);
 assert.match(makeUnmatchedCsv([{ track: rows[0], reason: "Not found" }]), /"Song, One"/);
 
 const localRows = parseSpotifyCsv(

@@ -1,7 +1,7 @@
 import { MediaItem, TidalApi, redux } from "@luna/lib";
 
-import { makeUnmatchedCsv, parseSpotifyCsv, type SpotifyTrackRow } from "./csv";
-import { readCsvFile, writeUnmatchedReport } from "./files.native";
+import { makeUnmatchedCsv, makeUnmatchedText, parseSpotifyCsv, type SpotifyTrackRow } from "./csv";
+import { readCsvFile, writeUnmatchedReports } from "./files.native";
 import { trace } from "./runtime";
 
 type SearchResponse = {
@@ -225,7 +225,10 @@ export const importCsvFiles = async (
 			.map((track, index) => ({ track, id: resolvedIds[index] }))
 			.filter(({ id }) => id === undefined)
 			.map(({ track }) => ({ track, reason: "No sufficiently close TIDAL match found" }));
-		const reportPath = unmatched.length > 0 ? await writeUnmatchedReport(source.filePath, makeUnmatchedCsv(unmatched)) : undefined;
+		const reportPath =
+			unmatched.length > 0
+				? await writeUnmatchedReports(source.filePath, makeUnmatchedText(unmatched), makeUnmatchedCsv(unmatched))
+				: undefined;
 
 		if (matchedIds.length === 0) {
 			summaries.push({

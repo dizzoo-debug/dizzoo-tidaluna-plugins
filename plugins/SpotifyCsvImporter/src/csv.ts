@@ -118,6 +118,8 @@ export const parseSpotifyCsv = (contents: string): SpotifyTrackRow[] => {
 	return parsed;
 };
 
+const cleanReportText = (value?: string) => value?.replace(/\s+/g, " ").trim() || "—";
+
 const escapeCsvField = (value: string | number | undefined) => {
 	const text = value === undefined ? "" : String(value);
 	return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
@@ -131,4 +133,18 @@ export const makeUnmatchedCsv = (rows: { track: SpotifyTrackRow; reason: string 
 			.join(","),
 	);
 	return `\uFEFF${[header.join(","), ...lines].join("\r\n")}\r\n`;
+};
+
+export const makeUnmatchedText = (rows: { track: SpotifyTrackRow; reason: string }[]) => {
+	const entries = rows.map(({ track, reason }, index) => {
+		const artists = cleanReportText(track.artistNames).replaceAll(";", ", ");
+		return [
+			`${index + 1}. ${artists} — ${cleanReportText(track.trackName)}`,
+			`   Album: ${cleanReportText(track.albumName)}`,
+			`   ISRC: ${cleanReportText(track.isrc)}`,
+			`   Source CSV row: ${track.rowNumber}`,
+			`   Reason: ${cleanReportText(reason)}`,
+		].join("\r\n");
+	});
+	return `\uFEFFSpotify CSV Importer\r\nTracks not matched in TIDAL: ${rows.length}\r\n\r\n${entries.join("\r\n\r\n")}\r\n`;
 };
