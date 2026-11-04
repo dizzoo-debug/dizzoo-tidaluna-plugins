@@ -32,7 +32,7 @@ export const Settings = () => {
 	const [addToCollection, setAddToCollection] = React.useState(settings.addToCollection);
 	const [running, setRunning] = React.useState(false);
 	const [status, setStatus] = React.useState(
-		"Runtime playlist-api-v7. Select one or more Spotify CSV files. Each file becomes one TIDAL playlist.",
+		"Runtime playlist-api-v8. Select one or more Spotify CSV files. Each file becomes one TIDAL playlist.",
 	);
 
 	const startImport = async () => {
@@ -53,10 +53,7 @@ export const Settings = () => {
 			const summaries = await importCsvFiles(selection.filePaths, addToCollection, (progress) => setStatus(progressText(progress)));
 			const matched = summaries.reduce((sum, item) => sum + item.matched, 0);
 			const unmatched = summaries.reduce((sum, item) => sum + item.unmatched, 0);
-			setStatus(
-				`Finished: ${summaries.length} playlist(s), ${matched} matched, ${unmatched} unmatched. Refreshing TIDAL playlists...`,
-			);
-			setTimeout(() => window.location.reload(), 1_500);
+			setStatus(`Finished: ${summaries.length} playlist(s), ${matched} matched, ${unmatched} unmatched.`);
 		} catch (error) {
 			setStatus(`Import failed: ${error instanceof Error ? error.message : String(error)}`);
 			trace.msg.err.withContext("Spotify CSV import failed")(error as Error);
