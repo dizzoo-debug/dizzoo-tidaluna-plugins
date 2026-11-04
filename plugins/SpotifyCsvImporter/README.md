@@ -2,6 +2,14 @@
 
 Import Spotify CSV exports as TIDAL playlists without rebuilding them by hand.
 
+## Supported CSV source
+
+Export your playlists with [Exportify](https://exportify.net). The importer is
+built and tested against Exportify CSV files (columns such as `Track URI`,
+`ISRC`, `Track Name`, `Album Name`, `Artist Name(s)`, `Release Date`,
+`Duration (ms)`). CSV files from other export tools are **untested** and may
+import with poorer matches or not at all.
+
 ## Features
 
 - Select several CSV files and create one TIDAL playlist per file.

@@ -42,6 +42,9 @@ extended and maintained by Dizzoo.
 
 Imports Spotify CSV exports directly into TIDAL playlists.
 
+> Export playlists with [Exportify](https://exportify.net). Only Exportify CSV
+> files are tested; CSVs from other export tools are untested.
+
 - Imports one or multiple CSV files at once.
 - Creates one TIDAL playlist for every selected file.
 - Preserves the original track order.
