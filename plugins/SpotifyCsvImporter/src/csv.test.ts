@@ -19,6 +19,8 @@ assert.match(report, /Tracks not matched in TIDAL: 1/);
 assert.match(report, /Artist "A" — Song, One/);
 assert.match(report, /Reason: Not found/);
 assert.match(makeUnmatchedCsv([{ track: rows[0], reason: "Not found" }]), /"Song, One"/);
+const retryRows = parseSpotifyCsv(makeUnmatchedCsv([{ track: { ...rows[0], rowNumber: 42 }, reason: "Not found" }]));
+assert.equal(retryRows[0].rowNumber, 42);
 
 const localRows = parseSpotifyCsv(
 	`Track URI,ISRC,Track Name,Album Name,Artist Name(s),Duration (ms)\nspotify:local:::Maxwell+-+Lifetime+%28Lazy+Dog+mix%29:552,,Maxwell - Lifetime (Lazy Dog mix),,,552000\nspotify:local::Ausrine:02+Su%C5%BEeistas+V%C4%97jas:226,,02 Sužeistas Vėjas,Ausrine,,226000\n`,

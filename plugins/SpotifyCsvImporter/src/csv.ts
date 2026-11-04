@@ -84,6 +84,7 @@ export const parseSpotifyCsv = (contents: string): SpotifyTrackRow[] => {
 	}
 
 	const isrcIndex = indexOf("isrc");
+	const sourceRowIndex = indexOf("csv row", "source csv row");
 	const uriIndex = indexOf("track uri", "uri");
 	const albumIndex = indexOf("album name", "album");
 	const durationIndex = indexOf("duration (ms)", "duration ms", "duration");
@@ -104,8 +105,9 @@ export const parseSpotifyCsv = (contents: string): SpotifyTrackRow[] => {
 		artistNames ||= local.album;
 		if (!trackName) continue;
 		const durationValue = durationIndex === undefined ? undefined : Number(values[durationIndex]);
+		const sourceRow = sourceRowIndex === undefined ? undefined : Number(values[sourceRowIndex]);
 		parsed.push({
-			rowNumber: index + 1,
+			rowNumber: Number.isInteger(sourceRow) && sourceRow! > 0 ? sourceRow! : index + 1,
 			isrc: isrcIndex === undefined ? undefined : values[isrcIndex]?.trim() || undefined,
 			trackName,
 			artistNames: artistNames ?? "",
