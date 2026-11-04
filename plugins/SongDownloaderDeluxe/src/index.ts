@@ -2,7 +2,8 @@ import { Tracer, type LunaUnload } from "@luna/core";
 import { Album, ContextMenu, getPlaybackInfo, MediaItem, redux, safeInterval, safeTimeout, StyleTag } from "@luna/lib";
 
 import { makeAlbumCreditsText, makeAlbumCreditsTextForAlbum } from "./credits";
-import { getIndexedDownloadPath, rememberDownloadedTrack } from "./downloadIndex";
+import { getIndexedDownloadPath, isAlbumComplete, markAlbumComplete, rememberDownloadedTrack } from "./downloadIndex";
+import { logDownload, type DownloadLogEntry } from "./downloadLog";
 import { safeDownload, safeDownloadProgress } from "./download.native";
 import { audioFileExists, fileExists, saveCoverArt, saveTextFileNextToAudio } from "./files.native";
 import {
@@ -37,10 +38,47 @@ let autoDownloadQueue = Promise.resolve();
 let autoAlbumQueue = Promise.resolve();
 
 const deferredRetryDelays = [15 * 60_000, 30 * 60_000, 60 * 60_000];
+// Startup Collection scan: gap between albums.
+const albumScanPaceMs = 1000;
+
+// On 429 an item goes to the back of its queue so everything TIDAL still serves keeps downloading.
+// Each item gets a few such turns; after that tracks fall back to the deferred retries above, and
+// albums wait for the next startup scan.
+const maxRateLimitRequeues = 8;
+const rateLimitRequeues = new Map<string, number>();
+const isRateLimited = (error: unknown) => /\b429\b|too many requests/i.test(error instanceof Error ? `${error.message} ${error.cause ?? ""}` : String(error));
+
+// Requeuing alone would spin through the queue when TIDAL refuses everything, so a run of 429s across
+// items slows both queues down (30s, 60s, ... up to 5 min between items) until something succeeds.
+let consecutiveRateLimits = 0;
+const rateLimitGap = () => (consecutiveRateLimits < 5 ? 0 : Math.min(300_000, 30_000 * 2 ** Math.floor((consecutiveRateLimits - 5) / 5)));
+const waitForRateLimit = async () => {
+	const gap = rateLimitGap();
+	if (gap === 0) return;
+	trace.warn(`TIDAL keeps answering 429; pausing downloads for ${gap / 1000}s.`);
+	await wait(gap);
+};
+/** Returns true when the item should be retried from the back of the queue. */
+const requeueOnRateLimit = (key: string, error: unknown) => {
+	if (!isRateLimited(error)) return false;
+	consecutiveRateLimits++;
+	const turns = (rateLimitRequeues.get(key) ?? 0) + 1;
+	if (turns > maxRateLimitRequeues) {
+		rateLimitRequeues.delete(key);
+		return false;
+	}
+	rateLimitRequeues.set(key, turns);
+	return true;
+};
+const noteSuccess = (key: string) => {
+	consecutiveRateLimits = 0;
+	rateLimitRequeues.delete(key);
+};
 
 const retryableDownloadError = (error: unknown) => {
 	const text = error instanceof Error ? `${error.name} ${error.message} ${error.cause ?? ""}` : String(error);
-	return /\b(?:401|403|408|429|500|502|503|504)\b|forbidden|timed?\s*out|fetch failed|socket|network/i.test(text);
+	// "terminated" is undici's error when the CDN drops the connection mid-stream.
+	return /\b(?:401|403|408|429|500|502|503|504)\b|forbidden|timed?\s*out|fetch failed|socket|network|terminated|aborted|premature close|other side closed|ECONNRESET|ECONNREFUSED|EPIPE|ETIMEDOUT|EAI_AGAIN|UND_ERR/i.test(text);
 };
 
 const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -68,7 +106,7 @@ const resolvePlaybackInfo = async (mediaItem: MediaItem): Promise<ResolvedPlayba
 			return { playbackInfo, quality };
 		} catch (error) {
 			lastError = error;
-			if (!retryableDownloadError(error)) throw error;
+			if (isRateLimited(error) || !retryableDownloadError(error)) throw error;
 		}
 	}
 	throw lastError;
@@ -107,10 +145,11 @@ const downloadWithRetry = async (mediaItem: MediaItem, path: string | string[], 
 			if (playbackInfo === undefined) throw new Error(`Track ${mediaItem.id} is not available`);
 			const tags = await mediaItem.flacTags();
 			await safeDownload(playbackInfo, path, tags, mediaItem.id);
-			return;
+			return playbackInfo;
 		} catch (error) {
 			lastError = error;
-			if (attempt >= maxAttempts || !retryableDownloadError(error)) throw error;
+			// A 429 goes back to the queue instead of hitting TIDAL again right away.
+			if (attempt >= maxAttempts || isRateLimited(error) || !retryableDownloadError(error)) throw error;
 			trace.warn(`TIDAL download failed for track ${mediaItem.id}; retrying with a fresh URL (${attempt}/${maxAttempts}).`);
 			await wait(attempt * 1500);
 		}
@@ -146,14 +185,30 @@ const queueFavoriteDownload = (
 	if (fromFavoritedAlbum) albumTrackIds.add(itemKey);
 	if (queuedFavoriteIds.has(itemKey)) return;
 	queuedFavoriteIds.add(itemKey);
+	// Filled in as the track resolves, so a failure can still be logged with whatever is known.
+	const logEntry: Omit<DownloadLogEntry, "status"> = {
+		source: startupResume ? "collection" : "favorite",
+		trackId: itemId,
+		album: sourceAlbum?.tidalAlbum.title,
+		requested: settings.downloadQuality,
+	};
+
+	let requeue = false;
 
 	autoDownloadQueue = autoDownloadQueue
 		.then(async () => {
+			// Already downloaded: decided from the local index and disk alone, with no TIDAL request.
+			// Before this, every startup scan fetched track, tags and playback info for each existing file.
+			if (startupResume) {
+				const indexedPath = getIndexedDownloadPath(itemId);
+				if (indexedPath !== undefined && (await audioFileExists(indexedPath))) return;
+			}
+			await waitForRateLimit();
 			const isAlbumTrack = albumTrackIds.has(itemKey);
 			if (isAlbumTrack ? !settings.autoDownloadAlbums : !settings.autoDownloadFavorites) return;
 			if (!isAlbumTrack && !redux.store.getState().favorites.tracks.some((favoriteId) => String(favoriteId) === itemKey)) return;
 			if (settings.defaultPath === undefined) {
-				trace.warn("Auto-download skipped: set a Default save path in Song Downloader Custom settings first.");
+				trace.warn("Auto-download skipped: set a Default save path in Song Downloader Deluxe settings first.");
 				return;
 			}
 
@@ -163,6 +218,9 @@ const queueFavoriteDownload = (
 
 			const { tags, coverUrl } = await mediaItem.flacTags();
 			const archiveTags = await getStablePathTags(mediaItem, tags, albumTagOverrides);
+			logEntry.artist = tags.artist?.[0];
+			logEntry.title = String(tags.title ?? "");
+			logEntry.album ??= archiveTags.album;
 			const resolvedPlayback = await resolvePlaybackInfo(mediaItem);
 			const { isAtmos, downloadedAudio } = getActualDownloadFormat(resolvedPlayback);
 			multiDiscAlbum ??= ((await mediaItem.album())?.tidalAlbum.numberOfVolumes ?? 1) > 1;
@@ -182,8 +240,15 @@ const queueFavoriteDownload = (
 			}
 
 			if (!((settings.skipExistingFiles || startupResume) && (await audioFileExists(audioPath)))) {
-				await downloadWithRetry(mediaItem, audioPath, resolvedPlayback);
+				const delivered = await downloadWithRetry(mediaItem, audioPath, resolvedPlayback);
 				trace.log(`Auto-downloaded newly favorited track: ${tags.artist?.[0]} - ${tags.title}`);
+				await logDownload(settings.defaultPath, {
+					...logEntry,
+					status: "downloaded",
+					delivered,
+					file: audioPath,
+					details: resolvedPlayback.quality !== settings.downloadQuality ? `TIDAL refused ${settings.downloadQuality}` : undefined,
+				});
 			} else {
 				trace.log(`Auto-download skipped existing track: ${tags.artist?.[0]} - ${tags.title}`);
 			}
@@ -201,8 +266,14 @@ const queueFavoriteDownload = (
 				if (credits !== undefined) await saveTextFileNextToAudio(audioPath, getCreditsFileName(archiveTags), credits);
 			}
 			deferredRetryCounts.delete(itemKey);
+			noteSuccess(`track:${itemKey}`);
 		})
-		.catch((error) => {
+		.catch(async (error) => {
+			if (requeueOnRateLimit(`track:${itemKey}`, error)) {
+				trace.warn(`TIDAL rate limit (429) for track ${itemId}; moved to the end of the queue.`);
+				requeue = true;
+				return;
+			}
 			if (retryableDownloadError(error)) {
 				const retryNumber = (deferredRetryCounts.get(itemKey) ?? 0) + 1;
 				const delay = deferredRetryDelays[retryNumber - 1];
@@ -211,19 +282,31 @@ const queueFavoriteDownload = (
 					trace.warn(
 						`TIDAL server temporarily rejected track ${itemId}; deferred retry ${retryNumber}/${deferredRetryDelays.length} scheduled in ${delay / 60_000} minutes.`,
 					);
+					await logDownload(settings.defaultPath, {
+						...logEntry,
+						status: "retry later",
+						details: `retry ${retryNumber}/${deferredRetryDelays.length} in ${delay / 60_000} min: ${String(error)}`,
+					});
 					safeTimeout(unloads, () => {
 						queueFavoriteDownload(itemId, fromFavoritedAlbum, albumTagOverrides, sourceAlbum, startupResume, multiDiscAlbum);
 					}, delay);
 				} else {
 					trace.warn(`TIDAL server still rejects track ${itemId}; it will be tried again during the next Collection startup scan.`);
+					await logDownload(settings.defaultPath, {
+						...logEntry,
+						status: "failed",
+						details: `gave up for now, tried again at next startup scan: ${String(error)}`,
+					});
 				}
 				return;
 			}
+			await logDownload(settings.defaultPath, { ...logEntry, status: "failed", details: String(error) });
 			trace.msg.err.withContext(`Failed to auto-download newly favorited track ${itemId}`)(error);
 		})
 		.finally(() => {
 			queuedFavoriteIds.delete(itemKey);
 			albumTrackIds.delete(itemKey);
+			if (requeue) queueFavoriteDownload(itemId, fromFavoritedAlbum, albumTagOverrides, sourceAlbum, startupResume, multiDiscAlbum);
 		});
 };
 
@@ -232,19 +315,61 @@ const queueAlbumDownload = (albumId: redux.ItemId, startupResume = false) => {
 	if (queuedAlbumIds.has(albumKey)) return;
 	queuedAlbumIds.add(albumKey);
 
+	const loadAlbum = async () => {
+		const album = await Album.fromId(albumId);
+		if (album === undefined) throw new Error(`Unable to load newly favorited album ${albumId}`);
+		return { album, mediaItems: await album.mediaItems() };
+	};
+
+	let requeue = false;
+
 	autoAlbumQueue = autoAlbumQueue
 		.then(async () => {
-			const album = await Album.fromId(albumId);
-			if (album === undefined) throw new Error(`Unable to load newly favorited album ${albumId}`);
+			if (startupResume && isAlbumComplete(albumId)) return;
+			// The queue runs one album at a time, so pacing here throttles the whole scan.
+			if (startupResume) await wait(albumScanPaceMs);
+			await waitForRateLimit();
+			const { album, mediaItems: albumItems } = await loadAlbum();
+			noteSuccess(`album:${albumKey}`);
+			const mediaItems: MediaItem[] = [];
+			for await (const mediaItem of albumItems) mediaItems.push(mediaItem);
+			const present = await Promise.all(
+				mediaItems.map(async (mediaItem) => {
+					const indexedPath = getIndexedDownloadPath(mediaItem.id);
+					return indexedPath !== undefined && (await audioFileExists(indexedPath));
+				}),
+			);
+			if (mediaItems.length > 0 && present.every(Boolean)) {
+				await markAlbumComplete(albumId);
+				trace.log(`Album complete on disk, skipped from now on: ${album.tidalAlbum.title}`);
+				return;
+			}
 			const albumTagOverrides = await getAlbumTagOverrides(album);
 			const multiDiscAlbum = album.tidalAlbum.numberOfVolumes > 1;
-			for await (const mediaItem of await album.mediaItems()) {
+			for await (const mediaItem of mediaItems) {
 				queueFavoriteDownload(mediaItem.id, true, albumTagOverrides, album, startupResume, multiDiscAlbum);
 			}
 			trace.log(`Queued newly favorited album: ${album.tidalAlbum.title}`);
 		})
-		.catch(trace.msg.err.withContext(`Failed to queue newly favorited album ${albumId}`))
-		.finally(() => queuedAlbumIds.delete(albumKey));
+		.catch(async (error) => {
+			if (requeueOnRateLimit(`album:${albumKey}`, error)) {
+				trace.warn(`TIDAL rate limit (429) for album ${albumId}; moved to the end of the queue.`);
+				requeue = true;
+				return;
+			}
+			await logDownload(settings.defaultPath, {
+				status: "album skipped",
+				source: startupResume ? "collection" : "favorite",
+				details: `album ${albumId}: ${String(error)}`,
+			});
+			// A startup scan covers the whole Collection; one toast per album would flood the screen.
+			if (startupResume) trace.warn(`Collection scan skipped album ${albumId} this time: ${String(error)}`);
+			else trace.msg.err.withContext(`Failed to queue newly favorited album ${albumId}`)(error);
+		})
+		.finally(() => {
+			queuedAlbumIds.delete(albumKey);
+			if (requeue) queueAlbumDownload(albumId, startupResume);
+		});
 };
 
 const initialFavorites = redux.store.getState().favorites;
@@ -256,7 +381,7 @@ const resumeCollectionAlbums = (albumIds: redux.ItemId[]) => {
 	if (startupResumeStarted || !settings.resumeCollectionAlbums || !settings.autoDownloadAlbums) return;
 	startupResumeStarted = true;
 	if (settings.defaultPath === undefined) {
-		trace.warn("Collection resume skipped: set a Default save path in Song Downloader Custom settings first.");
+		trace.warn("Collection resume skipped: set a Default save path in Song Downloader Deluxe settings first.");
 		return;
 	}
 	trace.log(`Startup Collection scan queued ${albumIds.length} favorite album(s). Existing audio files will be skipped.`);
@@ -433,11 +558,22 @@ ContextMenu.onMediaItem(unloads, async ({ mediaCollection, contextMenu }) => {
 						},
 						50,
 					);
+					const logEntry = {
+						source: "manual" as const,
+						artist: tags.artist?.[0],
+						album: archiveTags.album,
+						title: String(tags.title ?? ""),
+						trackId: mediaItem.id,
+						requested: settings.downloadQuality,
+						file: path,
+					};
 					try {
-						await downloadWithRetry(mediaItem, path, resolvedPlayback);
+						const delivered = await downloadWithRetry(mediaItem, path, resolvedPlayback);
 						downloadedCount++;
 						downloadSucceeded = true;
+						await logDownload(settings.defaultPath, { ...logEntry, status: "downloaded", delivered });
 					} catch (error) {
+						await logDownload(settings.defaultPath, { ...logEntry, status: "failed", details: String(error) });
 						trace.msg.err.withContext(`Failed to download ${tags.title}`)(error);
 					} finally {
 						clearInterval();

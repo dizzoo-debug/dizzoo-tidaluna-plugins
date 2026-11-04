@@ -3,6 +3,7 @@ import { MediaItem, Quality, type redux } from "@luna/lib";
 import { LunaButtonSetting, LunaSelectItem, LunaSelectSetting, LunaSettings, LunaSwitchSetting, LunaTextSetting } from "@luna/ui";
 
 import React from "react";
+import { clearCompleteAlbums, completeAlbumCount } from "./downloadIndex";
 import { getDownloadFolder } from "./helpers";
 
 type Settings = {
@@ -81,6 +82,7 @@ export const Settings = () => {
 	const [autoDownloadFavorites, setAutoDownloadFavorites] = React.useState(settings.autoDownloadFavorites);
 	const [autoDownloadAlbums, setAutoDownloadAlbums] = React.useState(settings.autoDownloadAlbums);
 	const [resumeCollectionAlbums, setResumeCollectionAlbums] = React.useState(settings.resumeCollectionAlbums);
+	const [completeAlbums, setCompleteAlbums] = React.useState(completeAlbumCount());
 
 	return (
 		<LunaSettings>
@@ -134,6 +136,15 @@ export const Settings = () => {
 				desc="After TIDAL starts, scan favorite albums and download only audio files missing from their final paths. Existing files are never overwritten by this startup scan."
 				checked={resumeCollectionAlbums}
 				onChange={(_, checked) => setResumeCollectionAlbums((settings.resumeCollectionAlbums = checked))}
+			/>
+			<LunaButtonSetting
+				title="Re-check complete albums"
+				desc={`${completeAlbums} album(s) were found complete on disk and are skipped by the startup scan without contacting TIDAL. Reset this after deleting or moving music files.`}
+				onClick={async () => {
+					await clearCompleteAlbums();
+					setCompleteAlbums(completeAlbumCount());
+				}}
+				children="Reset"
 			/>
 			<LunaTextSetting
 				title="Cover filename format"

@@ -1,4 +1,4 @@
-import { access, constants, mkdir, stat, writeFile } from "fs/promises";
+import { access, appendFile, constants, mkdir, stat, writeFile } from "fs/promises";
 import { dirname, join } from "path";
 
 const resolvePath = (filePath: string | string[]) => (Array.isArray(filePath) ? join(...filePath) : filePath);
@@ -54,4 +54,17 @@ export const saveTextFileNextToAudio = async (
 		if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
 		throw error;
 	}
+};
+
+export const appendDownloadLog = async (rootPath: string, fileName: string, header: string, line: string) => {
+	const logPath = join(rootPath, fileName);
+	await mkdir(rootPath, { recursive: true });
+	try {
+		// BOM so Excel opens the UTF-8 file with the right encoding.
+		await writeFile(logPath, `${String.fromCharCode(0xfeff)}${header}\r\n`, { encoding: "utf8", flag: "wx" });
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+	}
+	await appendFile(logPath, `${line}\r\n`, "utf8");
+	return logPath;
 };

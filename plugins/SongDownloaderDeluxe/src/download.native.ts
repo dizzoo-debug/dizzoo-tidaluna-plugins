@@ -1,5 +1,6 @@
 import sanitize from "sanitize-filename";
 
+import { randomUUID } from "crypto";
 import { createWriteStream } from "fs";
 import { access, constants, link, mkdir, rm } from "fs/promises";
 import { dirname, join, parse } from "path";
@@ -16,6 +17,12 @@ type DownloadTags = {
 
 const progressByTrack = new Map<string, FetchProgress>();
 let downloadQueue = Promise.resolve();
+
+const exists = (path: string) =>
+	access(path, constants.F_OK).then(
+		() => true,
+		() => false,
+	);
 
 const resolvePath = (filePath: string | string[]) => (Array.isArray(filePath) ? join(...filePath) : filePath);
 
@@ -54,17 +61,13 @@ const performDownload = async (
 	const requestedPath = resolvePath(filePath);
 	const parsed = parse(requestedPath);
 	const finalPath = join(parsed.dir, sanitize(parsed.base));
-	const partialPath = `${finalPath}.songdownloader.part`;
+	// Unique per download, so another downloader (or another plugin instance) writing the same track
+	// can never delete or interleave with this partial file.
+	const partialPath = `${finalPath}.${process.pid}-${randomUUID().slice(0, 8)}.songdownloader.part`;
 	await mkdir(dirname(finalPath), { recursive: true });
 
-	try {
-		await access(finalPath, constants.F_OK);
-		return;
-	} catch {
-		// Expected when this is a new download.
-	}
+	if (await exists(finalPath)) return;
 
-	await rm(partialPath, { force: true });
 	const progress: FetchProgress = { total: 0, downloaded: 0 };
 	progressByTrack.set(String(trackId), progress);
 
@@ -74,7 +77,12 @@ const performDownload = async (
 			await pipeline(source, createWriteStream(partialPath, { flags: "wx" }));
 		});
 		// A hard link is atomic and refuses to overwrite an existing destination.
-		await link(partialPath, finalPath);
+		try {
+			await link(partialPath, finalPath);
+		} catch (error) {
+			// Someone else finished the same file while we were downloading: theirs is complete, keep it.
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+		}
 		await rm(partialPath, { force: true });
 	} catch (error) {
 		await rm(partialPath, { force: true }).catch(() => undefined);
