@@ -190,6 +190,23 @@ export const Settings = () => {
 				value={creditsFileNameFormat}
 				onChange={(e) => setCreditsFileNameFormat((settings.creditsFileNameFormat = e.target.value))}
 			/>
+			<LunaButtonSetting
+				title="Choose library root"
+				desc={
+					<>
+						Default save path for the organized library: all downloads, cover art, credits and the download log go here.
+						<br />
+						{defaultPath ? <>Using {defaultPath}</> : <>Not set: manual downloads ask where to save.</>}
+					</>
+				}
+				sx={{ whiteSpace: "nowrap", flexShrink: 0, minWidth: "max-content" }}
+				children="Change root"
+				onClick={async () => {
+					// Cancelling the folder dialog keeps the current root.
+					const folder = await getDownloadFolder();
+					if (folder !== undefined) setDefaultPath((settings.defaultPath = folder));
+				}}
+			/>
 			<FormatSetting
 				title="Path format"
 				desc={
@@ -227,23 +244,6 @@ export const Settings = () => {
 						))}
 					</ul>
 				}
-			/>
-			<LunaButtonSetting
-				title="Choose library root"
-				desc={
-					<>
-						Default save path for the organized library: all downloads, cover art, credits and the download log go here.
-						<br />
-						{defaultPath ? <>Using {defaultPath}</> : <>Not set: manual downloads ask where to save.</>}
-					</>
-				}
-				sx={{ whiteSpace: "nowrap", flexShrink: 0, minWidth: "max-content" }}
-				children="Change root"
-				onClick={async () => {
-					// Cancelling the folder dialog keeps the current root.
-					const folder = await getDownloadFolder();
-					if (folder !== undefined) setDefaultPath((settings.defaultPath = folder));
-				}}
 			/>
 		</LunaSettings>
 	);
