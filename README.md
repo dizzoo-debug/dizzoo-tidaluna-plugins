@@ -33,6 +33,9 @@ An enhanced TIDAL download and local music-library management plugin.
 - Retries temporary server failures with fresh playback URLs.
 - Provides configurable audio, cover and credits filenames.
 - Ignores personalized radio-station favorites.
+- Defaults to `D:\!My Music` with normalized artist/album/year/edition folders.
+- Groups confirmed soundtracks under `!OST` and TIDAL `Various Artists` releases
+  under `Various Artists`.
 
 Song Downloader Deluxe is based on the original Song Downloader plugin by
 [Inrixia](https://github.com/Inrixia/luna-plugins/tree/master/plugins/SongDownloader),

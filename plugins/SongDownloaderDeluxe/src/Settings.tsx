@@ -20,22 +20,24 @@ type Settings = {
 	autoDownloadFavorites: boolean;
 	autoDownloadAlbums: boolean;
 	resumeCollectionAlbums: boolean;
+	libraryLayoutVersion: number;
 };
 
 const defaultSettings: Settings = {
 	downloadQuality: Quality.Max.audioQuality,
-	defaultPath: "D:\\!Music",
-	pathFormat: "{albumArtist}/{album} ({year})/{trackNumber} - {artist} - {title}",
-	multiDiscPathFormat: "{albumArtist}/{album} ({year})/CD{discNumber}/{trackNumber} - {artist} - {title}",
+	defaultPath: "D:\\!My Music",
+	pathFormat: "{libraryRoot}/{archiveAlbumArtist} - {archiveAlbumTitle} ({year}){variantSuffix}/{trackNumber} - {artist} - {title}",
+	multiDiscPathFormat: "{libraryRoot}/{archiveAlbumArtist} - {archiveAlbumTitle} ({year}){variantSuffix}/CD{discNumber}/{trackNumber} - {artist} - {title}",
 	useRealMAX: false,
 	skipExistingFiles: true,
 	saveCoverArt: true,
-	coverFileNameFormat: "{albumArtist} - {album} ({year})",
+	coverFileNameFormat: "{archiveAlbumArtist} - {archiveAlbumTitle} ({year}){variantSuffix}",
 	saveAlbumCredits: true,
-	creditsFileNameFormat: "{albumArtist} - {album} ({year}) - credits",
+	creditsFileNameFormat: "{archiveAlbumArtist} - {archiveAlbumTitle} ({year}){variantSuffix} - credits",
 	autoDownloadFavorites: true,
 	autoDownloadAlbums: true,
 	resumeCollectionAlbums: true,
+	libraryLayoutVersion: 2,
 };
 
 const pluginStorage = ReactiveStore.getStore("@luna/pluginStorage");
@@ -53,8 +55,17 @@ const migratedSettings: Settings = {
 	...legacySettings,
 	...existingCustomSettings,
 };
+if (existingCustomSettings?.libraryLayoutVersion !== defaultSettings.libraryLayoutVersion) {
+	migratedSettings.defaultPath = defaultSettings.defaultPath;
+	migratedSettings.pathFormat = defaultSettings.pathFormat;
+	migratedSettings.multiDiscPathFormat = defaultSettings.multiDiscPathFormat;
+	migratedSettings.coverFileNameFormat = defaultSettings.coverFileNameFormat;
+	migratedSettings.creditsFileNameFormat = defaultSettings.creditsFileNameFormat;
+	migratedSettings.libraryLayoutVersion = defaultSettings.libraryLayoutVersion;
+}
 const needsMigration =
 	existingCustomSettings === undefined ||
+	existingCustomSettings.libraryLayoutVersion !== defaultSettings.libraryLayoutVersion ||
 	(Object.keys(defaultSettings) as (keyof Settings)[]).some(
 		(key) => existingCustomSettings[key] === undefined && defaultSettings[key] !== undefined,
 	);
@@ -150,7 +161,7 @@ export const Settings = () => {
 				title="Cover filename format"
 				desc={
 					<>
-						The <b>.jpg</b> extension is added automatically. Default: {"{albumArtist} - {album} ({year})"}
+						The <b>.jpg</b> extension is added automatically. Default: {"{archiveAlbumArtist} - {archiveAlbumTitle} ({year}){variantSuffix}"}
 					</>
 				}
 				value={coverFileNameFormat}
@@ -160,7 +171,7 @@ export const Settings = () => {
 				title="Credits filename format"
 				desc={
 					<>
-						The <b>.txt</b> extension is added automatically. Default: {"{albumArtist} - {album} ({year}) - credits"}
+						The <b>.txt</b> extension is added automatically. Default: {"{archiveAlbumArtist} - {archiveAlbumTitle} ({year}){variantSuffix} - credits"}
 					</>
 				}
 				value={creditsFileNameFormat}
@@ -197,6 +208,9 @@ export const Settings = () => {
 						<div style={{ marginTop: 8 }} />
 						You can use the following tags:
 						<ul>
+							{["libraryRoot", "archiveAlbumArtist", "archiveAlbumTitle", "variantSuffix"].map((tag) => (
+								<li key={tag}>{tag}</li>
+							))}
 							{MediaItem.availableTags.map((tag) => (
 								<li key={tag}>{tag}</li>
 							))}
@@ -211,7 +225,7 @@ export const Settings = () => {
 				desc={
 					<>
 						Used only when TIDAL reports more than one disc. Default:{" "}
-						{"{albumArtist}/{album} ({year})/CD{discNumber}/{trackNumber} - {artist} - {title}"}
+						{"{libraryRoot}/{archiveAlbumArtist} - {archiveAlbumTitle} ({year}){variantSuffix}/CD{discNumber}/{trackNumber} - {artist} - {title}"}
 					</>
 				}
 				value={multiDiscPathFormat}

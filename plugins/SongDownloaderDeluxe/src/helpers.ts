@@ -2,11 +2,24 @@ import { MediaItem, type redux } from "@luna/lib";
 import { showOpenDialog, showSaveDialog } from "@luna/lib.native";
 import { settings } from "./Settings";
 
-import sanitize from "sanitize-filename";
+import {
+	addEditionVariant,
+	formatVariantSuffix,
+	isSoundtrackRelease,
+	isVariousArtists,
+	normalizeEdition,
+	sanitizeLibraryComponent,
+} from "./archiveLayout";
 
 export type TagValues = Awaited<ReturnType<MediaItem["flacTags"]>>["tags"];
+export type ArchiveTagValues = TagValues & {
+	libraryRoot?: string;
+	archiveAlbumArtist?: string;
+	archiveAlbumTitle?: string;
+	variantSuffix?: string;
+};
 
-const formatTidalTitle = (title: string, version?: string | null) => {
+export const formatTidalTitle = (title: string, version?: string | null) => {
 	if (version && !title.toLowerCase().includes(version.toLowerCase())) return `${title} (${version})`;
 	return title;
 };
@@ -20,7 +33,7 @@ export const getStablePathTags = async (
 	mediaItem: MediaItem,
 	enrichedTags: TagValues,
 	tagOverrides?: Partial<TagValues>,
-): Promise<TagValues> => {
+): Promise<ArchiveTagValues> => {
 	const item = mediaItem.tidalItem;
 	const album = (await mediaItem.album())?.tidalAlbum;
 	const tags: TagValues = { ...enrichedTags };
@@ -42,19 +55,44 @@ export const getStablePathTags = async (
 	if (item.isrc) tags.isrc = item.isrc;
 	if (album?.upc) tags.upc = album.upc;
 
-	return { ...tags, ...tagOverrides };
+	const mergedTags: ArchiveTagValues = { ...tags, ...tagOverrides };
+	const selectedAlbumTitle = String(mergedTags.album ?? album?.title ?? "Unknown Album");
+	const selectedAlbumArtists = mergedTags.albumArtist ?? albumArtists ?? artists;
+	const albumArtistNames = Array.isArray(selectedAlbumArtists) ? selectedAlbumArtists : [selectedAlbumArtists];
+	const albumArtist = albumArtistNames.filter(Boolean)[0] ?? "Unknown Artist";
+	const { archiveTitle, variants } = normalizeEdition(album?.title ?? selectedAlbumTitle, album?.version);
+	const soundtrack = isSoundtrackRelease(album?.title ?? selectedAlbumTitle, album?.version, album?.genre);
+	const compilation = !soundtrack && isVariousArtists(albumArtistNames.filter(Boolean));
+
+	mergedTags.libraryRoot = soundtrack ? "!OST" : compilation ? "Various Artists" : albumArtist;
+	mergedTags.archiveAlbumArtist = compilation ? "Various Artists" : albumArtist;
+	mergedTags.archiveAlbumTitle = archiveTitle;
+	mergedTags.variantSuffix = formatVariantSuffix(variants);
+	return mergedTags;
 };
 
-export const applyTagFormat = (format: string, tags: TagValues) => {
-	let value = format;
-	for (const tag of MediaItem.availableTags) {
-		let tagValue = tags[tag];
+export const applyTagFormat = (format: string, tags: ArchiveTagValues) =>
+	format.replace(/\{([^{}]+)\}/g, (placeholder, tag: string) => {
+		let tagValue = (tags as Record<string, string | string[] | undefined>)[tag];
 		if (Array.isArray(tagValue)) tagValue = tagValue[0];
-		if (tagValue === undefined) continue;
+		if (tagValue === undefined) return placeholder;
 		if (tag === "trackNumber") tagValue = tagValue.padStart(2, "0");
-		value = value.replaceAll(`{${tag}}`, sanitize(tagValue));
+		return sanitizeLibraryComponent(tagValue);
+	});
+
+export const withAtmosVariant = (tags: ArchiveTagValues): ArchiveTagValues => ({
+	...tags,
+	variantSuffix: addEditionVariant(tags.variantSuffix, "Atmos"),
+});
+
+export const getEmbeddedTags = (tags: ArchiveTagValues): TagValues => {
+	const embedded: Partial<TagValues> = {};
+	const embeddedRecord = embedded as Record<string, string | string[] | undefined>;
+	for (const tag of MediaItem.availableTags) {
+		const value = tags[tag];
+		if (value !== undefined) embeddedRecord[tag] = value;
 	}
-	return value;
+	return embedded as TagValues;
 };
 
 export const getDownloadFolder = async () => {
@@ -74,12 +112,13 @@ export const getFileName = async (
 	tagOverrides?: Partial<TagValues>,
 	multiDiscAlbum?: boolean,
 	fileExtension?: string,
+	preparedTags?: ArchiveTagValues,
 ) => {
 	multiDiscAlbum ??= ((await mediaItem.album())?.tidalAlbum.numberOfVolumes ?? 1) > 1;
 	const pathFormat = multiDiscAlbum ? settings.multiDiscPathFormat : settings.pathFormat;
 	let fileName = `${pathFormat}.${fileExtension ?? (await mediaItem.fileExtension(audioQuality))}`;
 	const { tags } = await mediaItem.flacTags();
-	return applyTagFormat(fileName, await getStablePathTags(mediaItem, tags, tagOverrides));
+	return applyTagFormat(fileName, preparedTags ?? (await getStablePathTags(mediaItem, tags, tagOverrides)));
 };
 
 /**
@@ -104,14 +143,14 @@ export const addAtmosFolderSuffix = (fileName: string, multiDiscAlbum = false) =
 	return `${fileName.slice(0, albumSeparatorIndex)} [Atmos]${fileName.slice(albumSeparatorIndex)}`;
 };
 
-export const getCoverFileName = (tags: TagValues) => {
+export const getCoverFileName = (tags: ArchiveTagValues) => {
 	const formatted = applyTagFormat(settings.coverFileNameFormat, tags).trim();
-	const fallback = [tags.albumArtist?.[0], tags.album, tags.year].filter(Boolean).join(" - ") || "cover";
-	return `${sanitize(formatted || fallback)}.jpg`;
+	const fallback = [tags.archiveAlbumArtist, tags.archiveAlbumTitle, tags.year].filter(Boolean).join(" - ") || "cover";
+	return `${sanitizeLibraryComponent(formatted || fallback)}.jpg`;
 };
 
-export const getCreditsFileName = (tags: TagValues) => {
+export const getCreditsFileName = (tags: ArchiveTagValues) => {
 	const formatted = applyTagFormat(settings.creditsFileNameFormat, tags).trim();
-	const fallback = [tags.albumArtist?.[0], tags.album, tags.year].filter(Boolean).join(" - ") || "album";
-	return `${sanitize(formatted || `${fallback} - credits`)}.txt`;
+	const fallback = [tags.archiveAlbumArtist, tags.archiveAlbumTitle, tags.year].filter(Boolean).join(" - ") || "album";
+	return `${sanitizeLibraryComponent(formatted || `${fallback} - credits`)}.txt`;
 };

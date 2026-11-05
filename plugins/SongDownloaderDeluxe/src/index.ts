@@ -13,9 +13,12 @@ import {
 	getCreditsFileName,
 	getDownloadFolder,
 	getDownloadPath,
+	getEmbeddedTags,
 	getFileName,
 	getStablePathTags,
+	formatTidalTitle,
 	type TagValues,
+	withAtmosVariant,
 } from "./helpers";
 import { settings } from "./Settings";
 
@@ -133,7 +136,14 @@ const getActualDownloadFormat = ({ playbackInfo, quality }: ResolvedPlayback) =>
 	return { isAtmos, downloadedAudio: isAtmos ? "Dolby Atmos" : qualityLabels[quality] };
 };
 
-const downloadWithRetry = async (mediaItem: MediaItem, path: string | string[], initialPlayback: ResolvedPlayback) => {
+type DownloadTagInfo = Awaited<ReturnType<MediaItem["flacTags"]>>;
+
+const downloadWithRetry = async (
+	mediaItem: MediaItem,
+	path: string | string[],
+	initialPlayback: ResolvedPlayback,
+	downloadTags?: DownloadTagInfo,
+) => {
 	const maxAttempts = 3;
 	let lastError: unknown;
 	for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -143,7 +153,7 @@ const downloadWithRetry = async (mediaItem: MediaItem, path: string | string[], 
 				? initialPlayback.playbackInfo
 				: await getPlaybackInfo(mediaItem.id, initialPlayback.quality);
 			if (playbackInfo === undefined) throw new Error(`Track ${mediaItem.id} is not available`);
-			const tags = await mediaItem.flacTags();
+			const tags = downloadTags ?? (await mediaItem.flacTags());
 			await safeDownload(playbackInfo, path, tags, mediaItem.id);
 			return playbackInfo;
 		} catch (error) {
@@ -159,7 +169,7 @@ const downloadWithRetry = async (mediaItem: MediaItem, path: string | string[], 
 
 const getAlbumTagOverrides = async (album: Album): Promise<Partial<TagValues>> => {
 	const overrides: Partial<TagValues> = {};
-	const title = album.tidalAlbum.title;
+	const title = formatTidalTitle(album.tidalAlbum.title, album.tidalAlbum.version);
 	const artists = album.tidalAlbum.artists?.map(({ name }) => name) ??
 		(album.tidalAlbum.artist?.name ? [album.tidalAlbum.artist.name] : []);
 	const year = album.releaseYear ?? album.releaseDate?.slice(0, 4);
@@ -212,17 +222,22 @@ const queueFavoriteDownload = (
 				return;
 			}
 
-			let mediaItem = await MediaItem.fromId(itemId, "track");
-			if (mediaItem === undefined) throw new Error(`Unable to load newly favorited track ${itemId}`);
+			const sourceMediaItem = await MediaItem.fromId(itemId, "track");
+			if (sourceMediaItem === undefined) throw new Error(`Unable to load newly favorited track ${itemId}`);
+			let mediaItem = sourceMediaItem;
 			if (settings.useRealMAX) mediaItem = (await mediaItem.max()) ?? mediaItem;
 
-			const { tags, coverUrl } = await mediaItem.flacTags();
-			const archiveTags = await getStablePathTags(mediaItem, tags, albumTagOverrides);
+			const downloadedTagInfo = await mediaItem.flacTags();
+			const sourceTagInfo = sourceMediaItem === mediaItem ? downloadedTagInfo : await sourceMediaItem.flacTags();
+			const { tags } = downloadedTagInfo;
+			const coverUrl = sourceTagInfo.coverUrl ?? downloadedTagInfo.coverUrl;
+			const archiveTags = await getStablePathTags(sourceMediaItem, tags, albumTagOverrides);
 			logEntry.artist = tags.artist?.[0];
 			logEntry.title = String(tags.title ?? "");
 			logEntry.album ??= archiveTags.album;
 			const resolvedPlayback = await resolvePlaybackInfo(mediaItem);
 			const { isAtmos, downloadedAudio } = getActualDownloadFormat(resolvedPlayback);
+			const presentationTags = isAtmos ? withAtmosVariant(archiveTags) : archiveTags;
 			multiDiscAlbum ??= ((await mediaItem.album())?.tidalAlbum.numberOfVolumes ?? 1) > 1;
 			let fileName = await getFileName(
 				mediaItem,
@@ -230,6 +245,7 @@ const queueFavoriteDownload = (
 				albumTagOverrides,
 				multiDiscAlbum,
 				getFileExtension(resolvedPlayback.playbackInfo),
+				presentationTags,
 			);
 			if (isAtmos) fileName = addAtmosFolderSuffix(fileName, multiDiscAlbum);
 			const audioPath = [settings.defaultPath, fileName];
@@ -240,7 +256,10 @@ const queueFavoriteDownload = (
 			}
 
 			if (!((settings.skipExistingFiles || startupResume) && (await audioFileExists(audioPath)))) {
-				const delivered = await downloadWithRetry(mediaItem, audioPath, resolvedPlayback);
+				const delivered = await downloadWithRetry(mediaItem, audioPath, resolvedPlayback, {
+					tags: getEmbeddedTags(archiveTags),
+					coverUrl,
+				});
 				trace.log(`Auto-downloaded newly favorited track: ${tags.artist?.[0]} - ${tags.title}`);
 				await logDownload(settings.defaultPath, {
 					...logEntry,
@@ -256,14 +275,14 @@ const queueFavoriteDownload = (
 			if (String(mediaItem.id) !== itemKey) await rememberDownloadedTrack(mediaItem.id, audioPath);
 
 			if (settings.saveCoverArt && coverUrl !== undefined) {
-				await saveCoverArt(audioPath, getCoverFileName(archiveTags), coverUrl);
+				await saveCoverArt(audioPath, getCoverFileName(presentationTags), coverUrl);
 			}
 			if (settings.saveAlbumCredits) {
 				const credits =
 					sourceAlbum === undefined
 						? await makeAlbumCreditsText(mediaItem, downloadedAudio)
 						: await makeAlbumCreditsTextForAlbum(sourceAlbum, downloadedAudio);
-				if (credits !== undefined) await saveTextFileNextToAudio(audioPath, getCreditsFileName(archiveTags), credits);
+				if (credits !== undefined) await saveTextFileNextToAudio(audioPath, getCreditsFileName(presentationTags), credits);
 			}
 			deferredRetryCounts.delete(itemKey);
 			noteSuccess(`track:${itemKey}`);
@@ -453,10 +472,11 @@ ContextMenu.onMediaItem(unloads, async ({ mediaCollection, contextMenu }) => {
 			const multiDiscAlbum = mediaCollection.tidalAlbum.numberOfVolumes > 1;
 			const resolvedPlayback = await resolvePlaybackInfo(firstMediaItem);
 			const { isAtmos, downloadedAudio } = getActualDownloadFormat(resolvedPlayback);
+			const presentationTags = isAtmos ? withAtmosVariant(tags) : tags;
 			let audioPath: string | string[];
 			if (settings.defaultPath !== undefined) {
 				const pathFormat = multiDiscAlbum ? settings.multiDiscPathFormat : settings.pathFormat;
-				let relativePath = `${applyTagFormat(pathFormat, tags)}.flac`;
+				let relativePath = `${applyTagFormat(pathFormat, presentationTags)}.flac`;
 				if (isAtmos) relativePath = addAtmosFolderSuffix(relativePath, multiDiscAlbum);
 				audioPath = [settings.defaultPath, relativePath];
 			} else {
@@ -469,7 +489,7 @@ ContextMenu.onMediaItem(unloads, async ({ mediaCollection, contextMenu }) => {
 			}
 
 			const credits = await makeAlbumCreditsTextForAlbum(mediaCollection, downloadedAudio);
-			await saveTextFileNextToAudio(audioPath, getCreditsFileName(tags), credits, true);
+			await saveTextFileNextToAudio(audioPath, getCreditsFileName(presentationTags), credits, true);
 			creditsButton.text = "Album Credits Saved";
 			setTimeout(() => (creditsButton.text = "Download Album Credits"), 3000);
 		} catch (error) {
@@ -509,6 +529,7 @@ ContextMenu.onMediaItem(unloads, async ({ mediaCollection, contextMenu }) => {
 		try {
 			for await (let mediaItem of await mediaCollection.mediaItems()) {
 				if (downloadState.cancel) break;
+				const sourceMediaItem = mediaItem;
 				const sourceItemId = mediaItem.id;
 				if (settings.useRealMAX) {
 					downloadButton.text = `Checking RealMax...`;
@@ -516,10 +537,14 @@ ContextMenu.onMediaItem(unloads, async ({ mediaCollection, contextMenu }) => {
 				}
 
 				downloadButton.text = `Loading tags...`;
-				const { tags, coverUrl } = await mediaItem.flacTags();
-				const archiveTags = await getStablePathTags(mediaItem, tags, albumTagOverrides);
+				const downloadedTagInfo = await mediaItem.flacTags();
+				const sourceTagInfo = sourceMediaItem === mediaItem ? downloadedTagInfo : await sourceMediaItem.flacTags();
+				const { tags } = downloadedTagInfo;
+				const coverUrl = sourceTagInfo.coverUrl ?? downloadedTagInfo.coverUrl;
+				const archiveTags = await getStablePathTags(sourceMediaItem, tags, albumTagOverrides);
 				const resolvedPlayback = await resolvePlaybackInfo(mediaItem);
 				const { isAtmos, downloadedAudio } = getActualDownloadFormat(resolvedPlayback);
+				const presentationTags = isAtmos ? withAtmosVariant(archiveTags) : archiveTags;
 				const multiDiscAlbum = sourceIsMultiDisc ?? (((await mediaItem.album())?.tidalAlbum.numberOfVolumes ?? 1) > 1);
 
 				downloadButton.text = `Fetching filename...`;
@@ -529,6 +554,7 @@ ContextMenu.onMediaItem(unloads, async ({ mediaCollection, contextMenu }) => {
 					albumTagOverrides,
 					multiDiscAlbum,
 					getFileExtension(resolvedPlayback.playbackInfo),
+					presentationTags,
 				);
 				if (isAtmos) fileName = addAtmosFolderSuffix(fileName, multiDiscAlbum);
 
@@ -568,7 +594,10 @@ ContextMenu.onMediaItem(unloads, async ({ mediaCollection, contextMenu }) => {
 						file: path,
 					};
 					try {
-						const delivered = await downloadWithRetry(mediaItem, path, resolvedPlayback);
+						const delivered = await downloadWithRetry(mediaItem, path, resolvedPlayback, {
+							tags: getEmbeddedTags(archiveTags),
+							coverUrl,
+						});
 						downloadedCount++;
 						downloadSucceeded = true;
 						await logDownload(settings.defaultPath, { ...logEntry, status: "downloaded", delivered });
@@ -586,7 +615,7 @@ ContextMenu.onMediaItem(unloads, async ({ mediaCollection, contextMenu }) => {
 
 				if (settings.saveCoverArt && coverUrl !== undefined) {
 					downloadButton.text = `Saving cover art...`;
-					await saveCoverArt(path, getCoverFileName(archiveTags), coverUrl).catch(
+					await saveCoverArt(path, getCoverFileName(presentationTags), coverUrl).catch(
 						trace.msg.err.withContext(`Failed to save cover art for ${archiveTags.album}`),
 					);
 				}
@@ -598,7 +627,7 @@ ContextMenu.onMediaItem(unloads, async ({ mediaCollection, contextMenu }) => {
 							? await makeAlbumCreditsText(mediaItem, downloadedAudio)
 							: await makeAlbumCreditsTextForAlbum(sourceAlbum, downloadedAudio);
 					if (credits !== undefined) {
-						await saveTextFileNextToAudio(path, getCreditsFileName(archiveTags), credits).catch(
+						await saveTextFileNextToAudio(path, getCreditsFileName(presentationTags), credits).catch(
 							trace.msg.err.withContext(`Failed to save album credits for ${archiveTags.album}`),
 						);
 					}
