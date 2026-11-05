@@ -84,9 +84,10 @@ if (settings.multiDiscPathFormat === undefined) settings.multiDiscPathFormat = d
 // Sanitize download quality
 if (Quality.fromAudioQuality(settings.downloadQuality) === undefined) settings.downloadQuality = Quality.Max.audioQuality;
 
-// Path formats are long: a wider field that wraps instead of hiding most of the value.
+// Formats are long: every format field gets the same width; path formats also wrap.
+const formatFieldSx = { minWidth: 420, marginTop: 0.25 };
 const FormatSetting = (props: React.ComponentProps<typeof LunaTextSetting>) => (
-	<LunaTextSetting multiline minRows={2} sx={{ minWidth: 420, marginTop: 0.25 }} {...props} />
+	<LunaTextSetting multiline minRows={2} sx={formatFieldSx} {...props} />
 );
 
 export const Settings = () => {
@@ -174,6 +175,7 @@ export const Settings = () => {
 						The <b>.jpg</b> extension is added automatically. Default: {"{archiveAlbumArtist} - {archiveAlbumTitle} ({year}){variantSuffix}"}
 					</>
 				}
+				sx={formatFieldSx}
 				value={coverFileNameFormat}
 				onChange={(e) => setCoverFileNameFormat((settings.coverFileNameFormat = e.target.value))}
 			/>
@@ -184,6 +186,7 @@ export const Settings = () => {
 						The <b>.txt</b> extension is added automatically. Default: {"{archiveAlbumArtist} - {archiveAlbumTitle} ({year}){variantSuffix} - credits"}
 					</>
 				}
+				sx={formatFieldSx}
 				value={creditsFileNameFormat}
 				onChange={(e) => setCreditsFileNameFormat((settings.creditsFileNameFormat = e.target.value))}
 			/>
