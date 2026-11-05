@@ -63,7 +63,7 @@ const performDownload = async (
 	const finalPath = join(parsed.dir, sanitize(parsed.base));
 	// Unique per download, so another downloader (or another plugin instance) writing the same track
 	// can never delete or interleave with this partial file.
-	const partialPath = `${finalPath}.${process.pid}-${randomUUID().slice(0, 8)}.songdownloader.part`;
+	const partialPath = `${finalPath}.${randomUUID().slice(0, 12)}.songdownloader.part`;
 	await mkdir(dirname(finalPath), { recursive: true });
 
 	if (await exists(finalPath)) return;

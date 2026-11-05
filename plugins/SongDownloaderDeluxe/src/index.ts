@@ -229,8 +229,9 @@ const queueFavoriteDownload = (
 			const isAlbumTrack = albumTrackIds.has(itemKey);
 			if (isAlbumTrack ? !settings.autoDownloadAlbums : !settings.autoDownloadFavorites) return;
 			if (!isAlbumTrack && !redux.store.getState().favorites.tracks.some((favoriteId) => String(favoriteId) === itemKey)) return;
-			if (settings.defaultPath === undefined) {
-				trace.warn("Auto-download skipped: set a Default save path in Song Downloader Deluxe settings first.");
+			const libraryBase = settings.defaultPath;
+			if (libraryBase === undefined) {
+				trace.warn("Auto-download skipped: set a Library root in Song Downloader Deluxe settings first.");
 				return;
 			}
 
@@ -261,7 +262,7 @@ const queueFavoriteDownload = (
 				presentationTags,
 			);
 			if (isAtmos) fileName = addAtmosFolderSuffix(fileName, multiDiscAlbum);
-			const audioPath = [settings.defaultPath, fileName];
+			const audioPath = [libraryBase, fileName];
 			const indexedPath = getIndexedDownloadPath(itemId);
 			if (startupResume && indexedPath !== undefined && (await audioFileExists(indexedPath))) {
 				trace.log(`Collection resume skipped indexed track: ${archiveTags.artist?.[0]} - ${archiveTags.title}`);
@@ -423,7 +424,7 @@ const resumeCollectionAlbums = (albumIds: redux.ItemId[]) => {
 	if (startupResumeStarted || !settings.resumeCollectionAlbums || !settings.autoDownloadAlbums) return;
 	startupResumeStarted = true;
 	if (settings.defaultPath === undefined) {
-		trace.warn("Collection resume skipped: set a Default save path in Song Downloader Deluxe settings first.");
+		trace.warn("Collection resume skipped: set a Library root in Song Downloader Deluxe settings first.");
 		return;
 	}
 	trace.log(`Startup Collection scan queued ${albumIds.length} favorite album(s). Existing audio files will be skipped.`);
@@ -497,11 +498,12 @@ ContextMenu.onMediaItem(unloads, async ({ mediaCollection, contextMenu }) => {
 			const { isAtmos, downloadedAudio } = getActualDownloadFormat(resolvedPlayback);
 			const presentationTags = isAtmos ? withAtmosVariant(tags) : tags;
 			let audioPath: string | string[];
-			if (settings.defaultPath !== undefined) {
+			const libraryBase = settings.defaultPath;
+			if (libraryBase !== undefined) {
 				const pathFormat = multiDiscAlbum ? settings.multiDiscPathFormat : settings.pathFormat;
 				let relativePath = `${applyTagFormat(pathFormat, presentationTags)}.flac`;
 				if (isAtmos) relativePath = addAtmosFolderSuffix(relativePath, multiDiscAlbum);
-				audioPath = [settings.defaultPath, relativePath];
+				audioPath = [libraryBase, relativePath];
 			} else {
 				const selectedFolder = await getDownloadFolder();
 				if (selectedFolder === undefined) {

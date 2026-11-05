@@ -1,6 +1,6 @@
 import { ReactiveStore } from "@luna/core";
 import { MediaItem, Quality, type redux } from "@luna/lib";
-import { LunaButtonSetting, LunaSelectItem, LunaSelectSetting, LunaSettings, LunaSwitchSetting, LunaTextSetting } from "@luna/ui";
+import { LunaButtonSetting, LunaSelectItem, LunaSelectSetting, LunaSettings, LunaSwitchSetting, LunaTextSetting, LunaTitle } from "@luna/ui";
 
 import React from "react";
 import { clearCompleteAlbums, completeAlbumCount } from "./downloadIndex";
@@ -84,6 +84,11 @@ if (settings.multiDiscPathFormat === undefined) settings.multiDiscPathFormat = d
 // Sanitize download quality
 if (Quality.fromAudioQuality(settings.downloadQuality) === undefined) settings.downloadQuality = Quality.Max.audioQuality;
 
+// Path formats are long: a wider field that wraps instead of hiding most of the value.
+const FormatSetting = (props: React.ComponentProps<typeof LunaTextSetting>) => (
+	<LunaTextSetting multiline minRows={2} sx={{ minWidth: 420, marginTop: 0.25 }} {...props} />
+);
+
 export const Settings = () => {
 	const [downloadQuality, setDownloadQuality] = React.useState(settings.downloadQuality);
 	const [defaultPath, setDefaultPath] = React.useState(settings.defaultPath);
@@ -137,13 +142,13 @@ export const Settings = () => {
 			/>
 			<LunaSwitchSetting
 				title="Auto-download newly favorited tracks"
-				desc="Download only tracks favorited after this option is enabled. Requires a Default save path and never imports old favorites automatically."
+				desc="Download only tracks favorited after this option is enabled. Requires a Library root and never imports old favorites automatically."
 				checked={autoDownloadFavorites}
 				onChange={(_, checked) => setAutoDownloadFavorites((settings.autoDownloadFavorites = checked))}
 			/>
 			<LunaSwitchSetting
 				title="Auto-download newly favorited albums"
-				desc="Download every track from albums favorited after this option is enabled. Requires a Default save path and never imports old favorite albums automatically."
+				desc="Download every track from albums favorited after this option is enabled. Requires a Library root and never imports old favorite albums automatically."
 				checked={autoDownloadAlbums}
 				onChange={(_, checked) => setAutoDownloadAlbums((settings.autoDownloadAlbums = checked))}
 			/>
@@ -182,26 +187,7 @@ export const Settings = () => {
 				value={creditsFileNameFormat}
 				onChange={(e) => setCreditsFileNameFormat((settings.creditsFileNameFormat = e.target.value))}
 			/>
-			<LunaButtonSetting
-				title="Default save path"
-				desc={
-					<>
-						Set a default folder to save files to (will disable prompting for path on download)
-						{defaultPath && (
-							<>
-								<br />
-								Using {defaultPath}
-							</>
-						)}
-					</>
-				}
-				children={defaultPath === undefined ? "Set default folder" : "Clear default folder"}
-				onClick={async () => {
-					if (defaultPath !== undefined) return setDefaultPath((settings.defaultPath = undefined));
-					setDefaultPath((settings.defaultPath = await getDownloadFolder()));
-				}}
-			/>
-			<LunaTextSetting
+			<FormatSetting
 				title="Path format"
 				desc={
 					<>
@@ -210,22 +196,14 @@ export const Settings = () => {
 						For example: {"{artist}/{album}/{title}"}
 						<br />
 						Saves in subfolder artist/album/ named <b>title.flac</b>.
-						<div style={{ marginTop: 8 }} />
-						You can use the following tags:
-						<ul>
-							{["libraryRoot", "archiveAlbumArtist", "archiveAlbumTitle", "variantSuffix"].map((tag) => (
-								<li key={tag}>{tag}</li>
-							))}
-							{MediaItem.availableTags.map((tag) => (
-								<li key={tag}>{tag}</li>
-							))}
-						</ul>
+						<br />
+						Available tags are listed below the multi-disc format.
 					</>
 				}
 				value={pathFormat}
 				onChange={(e) => setPathFormat((settings.pathFormat = e.target.value))}
 			/>
-			<LunaTextSetting
+			<FormatSetting
 				title="Multi-disc path format"
 				desc={
 					<>
@@ -235,6 +213,36 @@ export const Settings = () => {
 				}
 				value={multiDiscPathFormat}
 				onChange={(e) => setMultiDiscPathFormat((settings.multiDiscPathFormat = e.target.value))}
+			/>
+			<LunaTitle
+				variant="h8"
+				title="Available format tags"
+				desc={
+					<ul style={{ columns: 2, columnGap: 32, margin: 0, paddingLeft: 20 }}>
+						{["libraryRoot", "archiveAlbumArtist", "archiveAlbumTitle", "variantSuffix", ...MediaItem.availableTags].map((tag) => (
+							<li key={tag}>{`{${tag}}`}</li>
+						))}
+					</ul>
+				}
+			/>
+			<LunaButtonSetting
+				title="Choose library root"
+				desc={
+					<>
+						Default save path for the organized library: all downloads, cover art, credits and the download log go here. When cleared, each manual download asks where to save.
+						{defaultPath && (
+							<>
+								<br />
+								Using {defaultPath}
+							</>
+						)}
+					</>
+				}
+				children={defaultPath === undefined ? "Set library root" : "Clear library root"}
+				onClick={async () => {
+					if (defaultPath !== undefined) return setDefaultPath((settings.defaultPath = undefined));
+					setDefaultPath((settings.defaultPath = await getDownloadFolder()));
+				}}
 			/>
 		</LunaSettings>
 	);
