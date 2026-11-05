@@ -76,6 +76,8 @@ export const applyTagFormat = (format: string, tags: ArchiveTagValues) =>
 		let tagValue = (tags as Record<string, string | string[] | undefined>)[tag];
 		if (Array.isArray(tagValue)) tagValue = tagValue[0];
 		if (tagValue === undefined) return placeholder;
+		// " [Deluxe] [Atmos]" or empty: keep the leading space and never turn an empty suffix into "Unknown".
+		if (tag === "variantSuffix") return tagValue.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "");
 		if (tag === "trackNumber") tagValue = tagValue.padStart(2, "0");
 		return sanitizeLibraryComponent(tagValue);
 	});

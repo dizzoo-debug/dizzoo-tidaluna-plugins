@@ -1,9 +1,9 @@
 export type EditionVariant = "Deluxe" | "Super Deluxe" | "Remastered" | "Atmos";
 
 const variantPatterns: Array<{ variant: Exclude<EditionVariant, "Atmos">; pattern: RegExp }> = [
-	{ variant: "Super Deluxe", pattern: /\bsuper\s+deluxe(?:\s+edition)?\b/gi },
-	{ variant: "Deluxe", pattern: /\bdeluxe(?:\s+edition)?\b/gi },
-	{ variant: "Remastered", pattern: /\b(?:remaster(?:ed)?|\d{4}\s+remaster)\b/gi },
+	{ variant: "Super Deluxe", pattern: /\bsuper\s+deluxe(?:\s+(?:edition|version))?\b/gi },
+	{ variant: "Deluxe", pattern: /\bdeluxe(?:\s+(?:edition|version))?\b/gi },
+	{ variant: "Remastered", pattern: /\b(?:\d{4}\s+)?remaster(?:ed)?(?:\s+\d{4})?(?:\s+(?:edition|version))?\b/gi },
 ];
 
 const soundtrackPattern =
@@ -11,6 +11,8 @@ const soundtrackPattern =
 
 const tidyEditionTitle = (value: string) =>
 	value
+		.replace(/([([])\s+/g, "$1")
+		.replace(/\s+([)\]])/g, "$1")
 		.replace(/\(\s*\)/g, "")
 		.replace(/\[\s*\]/g, "")
 		.replace(/\s+(?:-|–|—|:)\s*$/g, "")

@@ -17,6 +17,11 @@ assert.deepEqual(normalizeEdition("Album - 2011 Remaster", null), {
 	archiveTitle: "Album",
 	variants: ["Remastered"],
 });
+assert.equal(normalizeEdition("Album (Remastered 2009)", null).archiveTitle, "Album");
+assert.equal(normalizeEdition("Album (Deluxe Version)", null).archiveTitle, "Album");
+assert.deepEqual(normalizeEdition("Album [Deluxe Edition] (Remastered)", null).variants, ["Deluxe", "Remastered"]);
+assert.deepEqual(normalizeEdition("The Remasters", null).variants, []);
+assert.equal(formatVariantSuffix([]), "");
 assert.equal(formatVariantSuffix(["Deluxe", "Deluxe"]), " [Deluxe]");
 assert.equal(addEditionVariant(" [Deluxe]", "Atmos"), " [Deluxe] [Atmos]");
 assert.equal(isSoundtrackRelease("Music from the Motion Picture", null, null), true);

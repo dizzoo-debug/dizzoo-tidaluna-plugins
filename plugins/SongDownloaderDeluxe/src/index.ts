@@ -41,6 +41,15 @@ let autoDownloadQueue = Promise.resolve();
 let autoAlbumQueue = Promise.resolve();
 
 const deferredRetryDelays = [15 * 60_000, 30 * 60_000, 60 * 60_000];
+
+/** Bookkeeping after the audio is on disk: a failure is a warning, never a failed download. */
+const afterAudioSaved = async (what: string, step: () => Promise<unknown>) => {
+	try {
+		await step();
+	} catch (error) {
+		trace.warn(`Audio saved, but ${what} failed: ${String(error)}`);
+	}
+};
 // Startup Collection scan: gap between albums.
 const albumScanPaceMs = 1000;
 
@@ -204,6 +213,9 @@ const queueFavoriteDownload = (
 	};
 
 	let requeue = false;
+	// Set once the audio file is on disk. Anything failing after that (download index, cover, credits,
+	// Luna's IndexedDB cache closing) is bookkeeping and must not be reported as a failed download.
+	let audioSaved = false;
 
 	autoDownloadQueue = autoDownloadQueue
 		.then(async () => {
@@ -238,7 +250,8 @@ const queueFavoriteDownload = (
 			const resolvedPlayback = await resolvePlaybackInfo(mediaItem);
 			const { isAtmos, downloadedAudio } = getActualDownloadFormat(resolvedPlayback);
 			const presentationTags = isAtmos ? withAtmosVariant(archiveTags) : archiveTags;
-			multiDiscAlbum ??= ((await mediaItem.album())?.tidalAlbum.numberOfVolumes ?? 1) > 1;
+			// Disc layout follows the chosen TIDAL release, not the RealMAX substitute.
+			multiDiscAlbum ??= ((await sourceMediaItem.album())?.tidalAlbum.numberOfVolumes ?? 1) > 1;
 			let fileName = await getFileName(
 				mediaItem,
 				resolvedPlayback.quality,
@@ -271,23 +284,33 @@ const queueFavoriteDownload = (
 			} else {
 				trace.log(`Auto-download skipped existing track: ${tags.artist?.[0]} - ${tags.title}`);
 			}
-			await rememberDownloadedTrack(itemId, audioPath);
-			if (String(mediaItem.id) !== itemKey) await rememberDownloadedTrack(mediaItem.id, audioPath);
-
-			if (settings.saveCoverArt && coverUrl !== undefined) {
-				await saveCoverArt(audioPath, getCoverFileName(presentationTags), coverUrl);
-			}
-			if (settings.saveAlbumCredits) {
-				const credits =
-					sourceAlbum === undefined
-						? await makeAlbumCreditsText(mediaItem, downloadedAudio)
-						: await makeAlbumCreditsTextForAlbum(sourceAlbum, downloadedAudio);
-				if (credits !== undefined) await saveTextFileNextToAudio(audioPath, getCreditsFileName(presentationTags), credits);
-			}
+			audioSaved = true;
 			deferredRetryCounts.delete(itemKey);
 			noteSuccess(`track:${itemKey}`);
+
+			const label = `${tags.artist?.[0]} - ${tags.title}`;
+			await afterAudioSaved(`download index for ${label}`, async () => {
+				await rememberDownloadedTrack(itemId, audioPath);
+				if (String(mediaItem.id) !== itemKey) await rememberDownloadedTrack(mediaItem.id, audioPath);
+			});
+			if (settings.saveCoverArt && coverUrl !== undefined) {
+				await afterAudioSaved(`cover art for ${label}`, () => saveCoverArt(audioPath, getCoverFileName(presentationTags), coverUrl));
+			}
+			if (settings.saveAlbumCredits) {
+				await afterAudioSaved(`album credits for ${label}`, async () => {
+					const credits =
+						sourceAlbum === undefined
+							? await makeAlbumCreditsText(mediaItem, downloadedAudio)
+							: await makeAlbumCreditsTextForAlbum(sourceAlbum, downloadedAudio);
+					if (credits !== undefined) await saveTextFileNextToAudio(audioPath, getCreditsFileName(presentationTags), credits);
+				});
+			}
 		})
 		.catch(async (error) => {
+			if (audioSaved) {
+				trace.warn(`Track ${itemId} was saved, but a follow-up step failed: ${String(error)}`);
+				return;
+			}
 			if (requeueOnRateLimit(`track:${itemKey}`, error)) {
 				trace.warn(`TIDAL rate limit (429) for track ${itemId}; moved to the end of the queue.`);
 				requeue = true;
@@ -609,28 +632,26 @@ ContextMenu.onMediaItem(unloads, async ({ mediaCollection, contextMenu }) => {
 					}
 				}
 				if (alreadyExists || downloadSucceeded) {
-					await rememberDownloadedTrack(sourceItemId, path);
-					if (String(mediaItem.id) !== String(sourceItemId)) await rememberDownloadedTrack(mediaItem.id, path);
+					await afterAudioSaved(`download index for ${tags.title}`, async () => {
+						await rememberDownloadedTrack(sourceItemId, path);
+						if (String(mediaItem.id) !== String(sourceItemId)) await rememberDownloadedTrack(mediaItem.id, path);
+					});
 				}
 
 				if (settings.saveCoverArt && coverUrl !== undefined) {
 					downloadButton.text = `Saving cover art...`;
-					await saveCoverArt(path, getCoverFileName(presentationTags), coverUrl).catch(
-						trace.msg.err.withContext(`Failed to save cover art for ${archiveTags.album}`),
-					);
+					await afterAudioSaved(`cover art for ${archiveTags.album}`, () => saveCoverArt(path, getCoverFileName(presentationTags), coverUrl));
 				}
 
 				if (settings.saveAlbumCredits) {
 					downloadButton.text = `Saving album credits...`;
-					const credits =
-						sourceAlbum === undefined
-							? await makeAlbumCreditsText(mediaItem, downloadedAudio)
-							: await makeAlbumCreditsTextForAlbum(sourceAlbum, downloadedAudio);
-					if (credits !== undefined) {
-						await saveTextFileNextToAudio(path, getCreditsFileName(presentationTags), credits).catch(
-							trace.msg.err.withContext(`Failed to save album credits for ${archiveTags.album}`),
-						);
-					}
+					await afterAudioSaved(`album credits for ${archiveTags.album}`, async () => {
+						const credits =
+							sourceAlbum === undefined
+								? await makeAlbumCreditsText(mediaItem, downloadedAudio)
+								: await makeAlbumCreditsTextForAlbum(sourceAlbum, downloadedAudio);
+						if (credits !== undefined) await saveTextFileNextToAudio(path, getCreditsFileName(presentationTags), credits);
+					});
 				}
 			}
 		} finally {
