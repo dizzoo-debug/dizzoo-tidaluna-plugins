@@ -1,6 +1,8 @@
 import { ReactiveStore } from "@luna/core";
 import type { redux } from "@luna/lib";
 
+import { reindexLibrary } from "./reindex.native";
+
 export type DownloadPath = string | string[];
 
 const storage = ReactiveStore.getStore("@luna/pluginStorage");
@@ -36,6 +38,20 @@ export const rememberDownloadedTrack = (itemId: redux.ItemId, path: DownloadPath
 	return queueIndexSave(async () => {
 		await storage.set(storageKey, snapshot);
 	});
+};
+
+/**
+ * Points the index at the files as they are on disk now, read from the TIDAL track id each FLAC
+ * carries. Renamed or moved albums are then recognized and never downloaded again. Disk only.
+ */
+export const reindexFromLibrary = async (root: string) => {
+	const result = await reindexLibrary(root);
+	downloadIndex = { ...downloadIndex, ...result.entries };
+	const snapshot = downloadIndex;
+	await queueIndexSave(async () => {
+		await storage.set(storageKey, snapshot);
+	});
+	return result;
 };
 
 /**

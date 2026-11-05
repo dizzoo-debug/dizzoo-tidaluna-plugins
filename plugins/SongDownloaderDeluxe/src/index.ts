@@ -2,7 +2,7 @@ import { Tracer, type LunaUnload } from "@luna/core";
 import { Album, ContextMenu, getPlaybackInfo, MediaItem, redux, safeInterval, safeTimeout, StyleTag } from "@luna/lib";
 
 import { makeAlbumCreditsText, makeAlbumCreditsTextForAlbum } from "./credits";
-import { getIndexedDownloadPath, isAlbumComplete, markAlbumComplete, rememberDownloadedTrack } from "./downloadIndex";
+import { getIndexedDownloadPath, isAlbumComplete, markAlbumComplete, rememberDownloadedTrack, reindexFromLibrary } from "./downloadIndex";
 import { logDownload, type DownloadLogEntry } from "./downloadLog";
 import { safeDownload, safeDownloadProgress } from "./download.native";
 import { audioFileExists, fileExists, saveCoverArt, saveTextFileNextToAudio } from "./files.native";
@@ -151,7 +151,8 @@ const downloadWithRetry = async (
 	mediaItem: MediaItem,
 	path: string | string[],
 	initialPlayback: ResolvedPlayback,
-	downloadTags?: DownloadTagInfo,
+	// Always the TIDAL-first tags from getEmbeddedTags, never raw flacTags() (see selectTidalTags).
+	downloadTags: DownloadTagInfo,
 ) => {
 	const maxAttempts = 3;
 	let lastError: unknown;
@@ -162,8 +163,7 @@ const downloadWithRetry = async (
 				? initialPlayback.playbackInfo
 				: await getPlaybackInfo(mediaItem.id, initialPlayback.quality);
 			if (playbackInfo === undefined) throw new Error(`Track ${mediaItem.id} is not available`);
-			const tags = downloadTags ?? (await mediaItem.flacTags());
-			await safeDownload(playbackInfo, path, tags, mediaItem.id);
+			await safeDownload(playbackInfo, path, downloadTags, mediaItem.id);
 			return playbackInfo;
 		} catch (error) {
 			lastError = error;
@@ -427,8 +427,14 @@ const resumeCollectionAlbums = (albumIds: redux.ItemId[]) => {
 		trace.warn("Collection resume skipped: set a Library root in Song Downloader Deluxe settings first.");
 		return;
 	}
-	trace.log(`Startup Collection scan queued ${albumIds.length} favorite album(s). Existing audio files will be skipped.`);
-	for (const albumId of albumIds) queueAlbumDownload(albumId, true);
+	// Re-index first, so albums renamed or moved on disk are recognized instead of downloaded again.
+	void reindexFromLibrary(settings.defaultPath)
+		.then((result) => trace.log(`Library re-indexed before the Collection scan: ${Object.keys(result.entries).length} track(s) from ${result.scanned} file(s).`))
+		.catch((error) => trace.warn(`Library re-index failed, using the existing index: ${String(error)}`))
+		.finally(() => {
+			trace.log(`Startup Collection scan queued ${albumIds.length} favorite album(s). Existing audio files will be skipped.`);
+			for (const albumId of albumIds) queueAlbumDownload(albumId, true);
+		});
 };
 
 if (favoriteStateHydrated) queueMicrotask(() => resumeCollectionAlbums(initialFavorites.albums));

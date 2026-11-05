@@ -3,7 +3,7 @@ import { MediaItem, Quality, type redux } from "@luna/lib";
 import { LunaButtonSetting, LunaSelectItem, LunaSelectSetting, LunaSettings, LunaSwitchSetting, LunaTextSetting, LunaTitle } from "@luna/ui";
 
 import React from "react";
-import { clearCompleteAlbums, completeAlbumCount } from "./downloadIndex";
+import { clearCompleteAlbums, completeAlbumCount, reindexFromLibrary } from "./downloadIndex";
 import { getDownloadFolder } from "./helpers";
 
 type Settings = {
@@ -105,6 +105,7 @@ export const Settings = () => {
 	const [autoDownloadAlbums, setAutoDownloadAlbums] = React.useState(settings.autoDownloadAlbums);
 	const [resumeCollectionAlbums, setResumeCollectionAlbums] = React.useState(settings.resumeCollectionAlbums);
 	const [completeAlbums, setCompleteAlbums] = React.useState(completeAlbumCount());
+	const [reindexStatus, setReindexStatus] = React.useState<string>();
 
 	return (
 		<LunaSettings>
@@ -167,6 +168,32 @@ export const Settings = () => {
 					setCompleteAlbums(completeAlbumCount());
 				}}
 				children="Reset"
+			/>
+			<LunaButtonSetting
+				title="Re-index library"
+				desc={
+					<>
+						Reads the TIDAL track id stored in every FLAC under the library root and points the download index at the files where they are now, so renamed or moved albums are not downloaded again. Works on disk only and runs automatically before the startup Collection scan.
+						{reindexStatus && (
+							<>
+								<br />
+								{reindexStatus}
+							</>
+						)}
+					</>
+				}
+				disabled={defaultPath === undefined || reindexStatus === "Re-indexing…"}
+				onClick={async () => {
+					if (settings.defaultPath === undefined) return;
+					setReindexStatus("Re-indexing…");
+					try {
+						const result = await reindexFromLibrary(settings.defaultPath);
+						setReindexStatus(`Indexed ${Object.keys(result.entries).length} track(s) from ${result.scanned} FLAC file(s); ${result.withoutId} without a TIDAL id.`);
+					} catch (error) {
+						setReindexStatus(`Re-index failed: ${String(error)}`);
+					}
+				}}
+				children="Re-index"
 			/>
 			<LunaTextSetting
 				title="Cover filename format"
