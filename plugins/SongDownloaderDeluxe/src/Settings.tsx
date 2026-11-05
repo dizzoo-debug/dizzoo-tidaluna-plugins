@@ -238,6 +238,7 @@ export const Settings = () => {
 						)}
 					</>
 				}
+				sx={{ whiteSpace: "nowrap", flexShrink: 0, minWidth: "max-content" }}
 				children={defaultPath === undefined ? "Set library root" : "Clear library root"}
 				onClick={async () => {
 					if (defaultPath !== undefined) return setDefaultPath((settings.defaultPath = undefined));
