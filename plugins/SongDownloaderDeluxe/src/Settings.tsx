@@ -50,27 +50,32 @@ const legacySettings = existingCustomSettings === undefined
 // already made. Previously the boolean values below were forced on every plugin
 // load, so restarting TIDAL restored the startup profile instead of the saved
 // values.
+const previousSettings = existingCustomSettings ?? legacySettings;
+const layoutMigration = previousSettings !== undefined && previousSettings.libraryLayoutVersion !== defaultSettings.libraryLayoutVersion;
 const migratedSettings: Settings = {
 	...defaultSettings,
 	...legacySettings,
 	...existingCustomSettings,
 };
-if (existingCustomSettings?.libraryLayoutVersion !== defaultSettings.libraryLayoutVersion) {
+if (layoutMigration) {
 	migratedSettings.defaultPath = defaultSettings.defaultPath;
 	migratedSettings.pathFormat = defaultSettings.pathFormat;
 	migratedSettings.multiDiscPathFormat = defaultSettings.multiDiscPathFormat;
 	migratedSettings.coverFileNameFormat = defaultSettings.coverFileNameFormat;
 	migratedSettings.creditsFileNameFormat = defaultSettings.creditsFileNameFormat;
+	// Do not duplicate an existing Collection into the new root before its files are migrated.
+	migratedSettings.resumeCollectionAlbums = false;
 	migratedSettings.libraryLayoutVersion = defaultSettings.libraryLayoutVersion;
 }
 const needsMigration =
 	existingCustomSettings === undefined ||
-	existingCustomSettings.libraryLayoutVersion !== defaultSettings.libraryLayoutVersion ||
+	layoutMigration ||
 	(Object.keys(defaultSettings) as (keyof Settings)[]).some(
 		(key) => existingCustomSettings[key] === undefined && defaultSettings[key] !== undefined,
 	);
 
 if (needsMigration) await pluginStorage.set("SongDownloaderCustom", migratedSettings);
+if (layoutMigration) await clearCompleteAlbums();
 
 export const settings = await ReactiveStore.getPluginStorage<Settings>("SongDownloaderCustom", defaultSettings);
 
