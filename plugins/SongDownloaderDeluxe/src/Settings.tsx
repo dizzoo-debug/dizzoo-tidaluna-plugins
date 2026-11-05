@@ -229,20 +229,17 @@ export const Settings = () => {
 				title="Choose library root"
 				desc={
 					<>
-						Default save path for the organized library: all downloads, cover art, credits and the download log go here. When cleared, each manual download asks where to save.
-						{defaultPath && (
-							<>
-								<br />
-								Using {defaultPath}
-							</>
-						)}
+						Default save path for the organized library: all downloads, cover art, credits and the download log go here.
+						<br />
+						{defaultPath ? <>Using {defaultPath}</> : <>Not set: manual downloads ask where to save.</>}
 					</>
 				}
 				sx={{ whiteSpace: "nowrap", flexShrink: 0, minWidth: "max-content" }}
-				children={defaultPath === undefined ? "Set library root" : "Clear library root"}
+				children="Change root"
 				onClick={async () => {
-					if (defaultPath !== undefined) return setDefaultPath((settings.defaultPath = undefined));
-					setDefaultPath((settings.defaultPath = await getDownloadFolder()));
+					// Cancelling the folder dialog keeps the current root.
+					const folder = await getDownloadFolder();
+					if (folder !== undefined) setDefaultPath((settings.defaultPath = folder));
 				}}
 			/>
 		</LunaSettings>
