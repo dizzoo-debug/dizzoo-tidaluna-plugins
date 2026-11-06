@@ -9,24 +9,23 @@ import {
 	normalizeEdition,
 	sanitizeLibraryComponent,
 } from "./archiveLayout";
+import { formatTidalTitle, selectEmbeddedYear, selectTidalTags, type TagValues } from "./tidalTags";
 
-export type TagValues = Awaited<ReturnType<MediaItem["flacTags"]>>["tags"];
+export { formatTidalTitle, type TagValues };
 export type ArchiveTagValues = TagValues & {
+	/** Year written into the file; `year` stays the TIDAL year used for paths. */
+	embeddedYear?: string;
 	libraryRoot?: string;
 	archiveAlbumArtist?: string;
 	archiveAlbumTitle?: string;
 	variantSuffix?: string;
 };
 
-export const formatTidalTitle = (title: string, version?: string | null) => {
-	if (version && !title.toLowerCase().includes(version.toLowerCase())) return `${title} (${version})`;
-	return title;
-};
-
 /**
  * MusicBrainz enrichment is useful inside the audio file, but it must never
  * decide the archive path: its availability and title punctuation can change
- * between launches. Paths are built from the raw TIDAL item and album instead.
+ * between launches. Paths are built from the raw TIDAL item and album instead,
+ * and the same TIDAL-first tags are what gets embedded (see selectTidalTags).
  */
 export const getStablePathTags = async (
 	mediaItem: MediaItem,
@@ -35,26 +34,29 @@ export const getStablePathTags = async (
 ): Promise<ArchiveTagValues> => {
 	const item = mediaItem.tidalItem;
 	const album = (await mediaItem.album())?.tidalAlbum;
-	const tags: TagValues = { ...enrichedTags };
 	const artists = item.artists?.map(({ name }) => name).filter(Boolean) ?? [];
 	const albumArtists = album?.artists?.map(({ name }) => name).filter(Boolean) ?? [];
-	const releaseDate = album?.releaseDate ?? item.releaseDate ?? item.streamStartDate;
-
-	if (item.title) tags.title = formatTidalTitle(item.title, item.version);
-	if (item.trackNumber !== undefined) tags.trackNumber = String(item.trackNumber);
-	if (item.volumeNumber !== undefined) tags.discNumber = String(item.volumeNumber);
-	if (artists.length > 0) tags.artist = artists;
-	if (album?.title) tags.album = formatTidalTitle(album.title, album.version);
-	if (albumArtists.length > 0) tags.albumArtist = albumArtists;
-	else if (artists.length > 0) tags.albumArtist = artists;
-	if (releaseDate) {
-		tags.date = releaseDate.slice(0, 10);
-		tags.year = album?.releaseYear ?? releaseDate.slice(0, 4);
-	}
-	if (item.isrc) tags.isrc = item.isrc;
-	if (album?.upc) tags.upc = album.upc;
+	const tags = selectTidalTags(enrichedTags, {
+		title: item.title,
+		version: item.version,
+		trackNumber: item.trackNumber,
+		volumeNumber: item.volumeNumber,
+		artists,
+		isrc: item.isrc,
+		releaseDate: item.releaseDate,
+		streamStartDate: item.streamStartDate,
+		album: album && {
+			title: album.title,
+			version: album.version,
+			artists: albumArtists,
+			releaseDate: album.releaseDate,
+			releaseYear: album.releaseYear,
+			upc: album.upc,
+		},
+	});
 
 	const mergedTags: ArchiveTagValues = { ...tags, ...tagOverrides };
+	mergedTags.embeddedYear = selectEmbeddedYear(enrichedTags, mergedTags);
 	const selectedAlbumTitle = String(mergedTags.album ?? album?.title ?? "Unknown Album");
 	const selectedAlbumArtists = mergedTags.albumArtist ?? albumArtists ?? artists;
 	const albumArtistNames = Array.isArray(selectedAlbumArtists) ? selectedAlbumArtists : [selectedAlbumArtists];
@@ -65,6 +67,7 @@ export const getStablePathTags = async (
 	mergedTags.libraryRoot = soundtrack ? "!OST" : compilation ? "Various Artists" : albumArtist;
 	mergedTags.archiveAlbumArtist = compilation ? "Various Artists" : albumArtist;
 	mergedTags.archiveAlbumTitle = archiveTitle;
+	// Only technical markers go after the year (" [Atmos]", added later); editions are in the title.
 	mergedTags.variantSuffix = formatVariantSuffix([]);
 	return mergedTags;
 };
@@ -92,6 +95,7 @@ export const getEmbeddedTags = (tags: ArchiveTagValues): TagValues => {
 		const value = tags[tag];
 		if (value !== undefined) embeddedRecord[tag] = value;
 	}
+	if (tags.embeddedYear) embedded.year = tags.embeddedYear;
 	return embedded as TagValues;
 };
 
