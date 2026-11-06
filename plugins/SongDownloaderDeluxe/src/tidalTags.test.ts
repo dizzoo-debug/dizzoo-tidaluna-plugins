@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 
-import { brainzTitleMatches, selectEmbeddedYear, selectTidalTags, type TagValues, type TidalTagSource } from "./tidalTags";
+import { brainzIsrcMatches, brainzTitleMatches, selectEmbeddedYear, selectTidalTags, type TagValues, type TidalTagSource } from "./tidalTags";
 
 const letItRoll: TidalTagSource["album"] = {
 	title: "Let It Roll - Songs Of George Harrison",
@@ -99,5 +99,22 @@ assert.equal(brainzTitleMatches("Radio", "Radio (MTV Unplugged Version)"), false
 assert.equal(brainzTitleMatches("Zombie (Acoustic)", "Zombie (Acoustic Version)"), true);
 assert.equal(brainzTitleMatches("All My Life", "All My Life (album version)"), true);
 assert.equal(selectEmbeddedYear({ title: "In Bloom", year: "1991" }, { title: "In Bloom (Live)", year: "2021" }), "2021");
+
+// With the recording's ISRCs known, only an ISRC match keeps MusicBrainz ids and the original year.
+const rightRecording = { ...wrongRecording, title: "My Sweet Lord (Remastered 2009)", year: "1970", musicbrainz_trackid: "7571a56b-994e-4829-ae8b-71abb84809be" };
+const byIsrc = selectTidalTags(rightRecording, { ...mySweetLord, brainzIsrcs: ["gbaye0901205", "GBAYE0100001"] });
+assert.equal(byIsrc.musicbrainz_trackid, "7571a56b-994e-4829-ae8b-71abb84809be");
+assert.equal(selectEmbeddedYear(rightRecording, byIsrc, { isrc: "GBAYE0901205", brainzIsrcs: ["GBAYE0901205"] }), "1970");
+// Same title, but an album-position guess whose recording lists other ISRCs: dropped.
+const positionGuess = selectTidalTags(rightRecording, { ...mySweetLord, brainzIsrcs: ["USAT20000001"] });
+assert.equal(positionGuess.musicbrainz_trackid, undefined);
+assert.equal(positionGuess.musicbrainz_albumid, undefined);
+assert.equal(selectEmbeddedYear(rightRecording, positionGuess, { isrc: "GBAYE0901205", brainzIsrcs: ["USAT20000001"] }), "2009");
+// A recording without ISRCs, or no MusicBrainz match at all, is not trusted either.
+assert.equal(selectTidalTags(rightRecording, { ...mySweetLord, brainzIsrcs: [] }).musicbrainz_trackid, undefined);
+assert.equal(selectEmbeddedYear(rightRecording, byIsrc, { isrc: "GBAYE0901205", brainzIsrcs: null }), "2009");
+// No TIDAL ISRC means nothing to match.
+assert.equal(brainzIsrcMatches(["GBAYE0901205"], undefined), false);
+assert.equal(brainzIsrcMatches(["GBAYE0901205"], " gbaye0901205 "), true);
 
 console.log("tidalTags tests passed");

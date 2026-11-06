@@ -31,11 +31,19 @@ export const getStablePathTags = async (
 	mediaItem: MediaItem,
 	enrichedTags: TagValues,
 	tagOverrides?: Partial<TagValues>,
+	/** The item whose flacTags() produced `enrichedTags`, when that is not `mediaItem` (RealMAX). */
+	enrichedFrom: MediaItem = mediaItem,
 ): Promise<ArchiveTagValues> => {
 	const item = mediaItem.tidalItem;
 	const album = (await mediaItem.album())?.tidalAlbum;
 	const artists = item.artists?.map(({ name }) => name).filter(Boolean) ?? [];
 	const albumArtists = album?.artists?.map(({ name }) => name).filter(Boolean) ?? [];
+	// flacTags() already resolved this lookup and brainzItem() is memoized: no extra MusicBrainz request.
+	const brainzItem = await enrichedFrom.brainzItem().catch(() => undefined);
+	const recordingIsrcs = brainzItem ? (brainzItem.recording?.isrcs ?? []) : null;
+	// A RealMAX substitute with another ISRC was matched for a different track: its MusicBrainz data is not trusted.
+	const brainzIsrcs = enrichedFrom.tidalItem.isrc === item.isrc ? recordingIsrcs : [];
+	const evidence = { isrc: item.isrc, brainzIsrcs };
 	const tags = selectTidalTags(enrichedTags, {
 		title: item.title,
 		version: item.version,
@@ -43,6 +51,7 @@ export const getStablePathTags = async (
 		volumeNumber: item.volumeNumber,
 		artists,
 		isrc: item.isrc,
+		brainzIsrcs,
 		releaseDate: item.releaseDate,
 		streamStartDate: item.streamStartDate,
 		album: album && {
@@ -56,7 +65,7 @@ export const getStablePathTags = async (
 	});
 
 	const mergedTags: ArchiveTagValues = { ...tags, ...tagOverrides };
-	mergedTags.embeddedYear = selectEmbeddedYear(enrichedTags, mergedTags);
+	mergedTags.embeddedYear = selectEmbeddedYear(enrichedTags, mergedTags, evidence);
 	const selectedAlbumTitle = String(mergedTags.album ?? album?.title ?? "Unknown Album");
 	const selectedAlbumArtists = mergedTags.albumArtist ?? albumArtists ?? artists;
 	const albumArtistNames = Array.isArray(selectedAlbumArtists) ? selectedAlbumArtists : [selectedAlbumArtists];

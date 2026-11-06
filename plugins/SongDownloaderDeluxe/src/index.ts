@@ -297,7 +297,7 @@ const queueFavoriteDownload = (
 			const sourceTagInfo = sourceMediaItem === mediaItem ? downloadedTagInfo : await sourceMediaItem.flacTags();
 			const { tags } = downloadedTagInfo;
 			const coverUrl = sourceTagInfo.coverUrl ?? downloadedTagInfo.coverUrl;
-			const archiveTags = await getStablePathTags(sourceMediaItem, tags, albumTagOverrides);
+			const archiveTags = await getStablePathTags(sourceMediaItem, tags, albumTagOverrides, mediaItem);
 			logEntry.artist = tags.artist?.[0];
 			logEntry.title = String(tags.title ?? "");
 			logEntry.album ??= archiveTags.album;
@@ -666,7 +666,7 @@ ContextMenu.onMediaItem(unloads, async ({ mediaCollection, contextMenu }) => {
 				const sourceTagInfo = sourceMediaItem === mediaItem ? downloadedTagInfo : await sourceMediaItem.flacTags();
 				const { tags } = downloadedTagInfo;
 				const coverUrl = sourceTagInfo.coverUrl ?? downloadedTagInfo.coverUrl;
-				const archiveTags = await getStablePathTags(sourceMediaItem, tags, albumTagOverrides);
+				const archiveTags = await getStablePathTags(sourceMediaItem, tags, albumTagOverrides, mediaItem);
 				const resolvedPlayback = await resolvePlaybackInfo(mediaItem);
 				const { downloadedAudio } = getActualDownloadFormat(resolvedPlayback);
 				const variants = getPathVariants(resolvedPlayback, await collectionMarkers(sourceMediaItem));

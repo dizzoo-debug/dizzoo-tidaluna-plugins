@@ -10,6 +10,11 @@ export type TidalTagSource = {
 	volumeNumber?: number;
 	artists?: string[];
 	isrc?: string | null;
+	/**
+	 * ISRCs of the MusicBrainz recording behind the enriched tags (`brainzItem().recording.isrcs`);
+	 * null when MusicBrainz matched nothing. Left undefined, the title comparison decides instead.
+	 */
+	brainzIsrcs?: readonly string[] | null;
 	releaseDate?: string | null;
 	streamStartDate?: string | null;
 	album?: {
@@ -43,8 +48,8 @@ const recordingKinds = (title: string) =>
 /**
  * Luna's MusicBrainz lookup falls back to "track N of the first release found by barcode search"
  * whenever the ISRC lookup fails (MusicBrainz answers 503 under load). That release can be another
- * pressing with a different running order, or another album entirely, so the recording it returns
- * is only trusted when its title still names the TIDAL track.
+ * pressing with a different running order, or another album entirely. When the recording's ISRCs
+ * are not available, it is only trusted when its title still names the TIDAL track.
  */
 export const brainzTitleMatches = (brainzTitle: string | undefined, tidalTitle: string) => {
 	if (!brainzTitle) return false;
@@ -57,12 +62,25 @@ export const brainzTitleMatches = (brainzTitle: string | undefined, tidalTitle: 
 	return base !== "" && base === comparableTitle(tidalTitle, true);
 };
 
+/** The MusicBrainz recording lists the TIDAL track's ISRC, so it is that very recording, not a guess. */
+export const brainzIsrcMatches = (brainzIsrcs: readonly string[] | null | undefined, tidalIsrc: string | null | undefined) =>
+	!!tidalIsrc && !!brainzIsrcs?.some((isrc) => isrc.trim().toUpperCase() === tidalIsrc.trim().toUpperCase());
+
+type BrainzEvidence = Pick<TidalTagSource, "isrc" | "brainzIsrcs">;
+
+/**
+ * Whether the MusicBrainz ids and original year in the enriched tags may be kept. When the recording's
+ * ISRCs are known only an ISRC match counts, so Luna's album-position fallback never supplies them.
+ */
+export const isBrainzTrusted = (enrichedTags: TagValues, tidalTitle: string, evidence: BrainzEvidence = {}) =>
+	evidence.brainzIsrcs !== undefined ? brainzIsrcMatches(evidence.brainzIsrcs, evidence.isrc) : brainzTitleMatches(enrichedTags.title, tidalTitle);
+
 /**
  * The year to embed: the original-release year from a MusicBrainz recording that is the same song,
  * otherwise the TIDAL year. Paths keep using the TIDAL year so the library layout does not move.
  */
-export const selectEmbeddedYear = (enrichedTags: TagValues, selectedTags: TagValues) => {
-	if (enrichedTags.year && selectedTags.title && brainzTitleMatches(enrichedTags.title, String(selectedTags.title))) return enrichedTags.year;
+export const selectEmbeddedYear = (enrichedTags: TagValues, selectedTags: TagValues, evidence: BrainzEvidence = {}) => {
+	if (enrichedTags.year && selectedTags.title && isBrainzTrusted(enrichedTags, String(selectedTags.title), evidence)) return enrichedTags.year;
 	return selectedTags.year;
 };
 
@@ -79,7 +97,7 @@ export const selectTidalTags = (enrichedTags: TagValues, item: TidalTagSource): 
 
 	if (item.title) {
 		const title = formatTidalTitle(item.title, item.version);
-		if (!brainzTitleMatches(enrichedTags.title, title)) {
+		if (!isBrainzTrusted(enrichedTags, title, item)) {
 			delete tags.musicbrainz_trackid;
 			delete tags.musicbrainz_albumid;
 			// Without a TIDAL date these could only have come from the wrong recording.
