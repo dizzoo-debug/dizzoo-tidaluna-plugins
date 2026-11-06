@@ -5,7 +5,6 @@ import { settings } from "./Settings";
 import {
 	addEditionVariant,
 	formatVariantSuffix,
-	isSoundtrackRelease,
 	isVariousArtists,
 	normalizeEdition,
 	sanitizeLibraryComponent,
@@ -60,14 +59,13 @@ export const getStablePathTags = async (
 	const selectedAlbumArtists = mergedTags.albumArtist ?? albumArtists ?? artists;
 	const albumArtistNames = Array.isArray(selectedAlbumArtists) ? selectedAlbumArtists : [selectedAlbumArtists];
 	const albumArtist = albumArtistNames.filter(Boolean)[0] ?? "Unknown Artist";
-	const { archiveTitle, variants } = normalizeEdition(album?.title ?? selectedAlbumTitle, album?.version);
-	const soundtrack = isSoundtrackRelease(album?.title ?? selectedAlbumTitle, album?.version, album?.genre);
+	const { archiveTitle, soundtrack } = normalizeEdition(album?.title ?? selectedAlbumTitle, album?.version, album?.genre);
 	const compilation = !soundtrack && isVariousArtists(albumArtistNames.filter(Boolean));
 
 	mergedTags.libraryRoot = soundtrack ? "!OST" : compilation ? "Various Artists" : albumArtist;
 	mergedTags.archiveAlbumArtist = compilation ? "Various Artists" : albumArtist;
 	mergedTags.archiveAlbumTitle = archiveTitle;
-	mergedTags.variantSuffix = formatVariantSuffix(variants);
+	mergedTags.variantSuffix = formatVariantSuffix([]);
 	return mergedTags;
 };
 
@@ -76,7 +74,7 @@ export const applyTagFormat = (format: string, tags: ArchiveTagValues) =>
 		let tagValue = (tags as Record<string, string | string[] | undefined>)[tag];
 		if (Array.isArray(tagValue)) tagValue = tagValue[0];
 		if (tagValue === undefined) return placeholder;
-		// " [Deluxe] [Atmos]" or empty: keep the leading space and never turn an empty suffix into "Unknown".
+		// " [Atmos]" or empty: keep the leading space and never turn an empty suffix into "Unknown".
 		if (tag === "variantSuffix") return tagValue.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "");
 		if (tag === "trackNumber") tagValue = tagValue.padStart(2, "0");
 		return sanitizeLibraryComponent(tagValue);

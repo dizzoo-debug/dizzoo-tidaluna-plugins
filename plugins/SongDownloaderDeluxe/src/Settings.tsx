@@ -5,6 +5,8 @@ import { LunaButtonSetting, LunaSelectItem, LunaSelectSetting, LunaSettings, Lun
 import React from "react";
 import { clearCompleteAlbums, completeAlbumCount, reindexFromLibrary } from "./downloadIndex";
 import { getDownloadFolder } from "./helpers";
+import type { IdentifyResult } from "./identify";
+import { identifyLibraryFiles, replaceIdentifiedFiles } from "./identifyLibrary";
 
 type Settings = {
 	downloadQuality: redux.AudioQuality;
@@ -106,6 +108,11 @@ export const Settings = () => {
 	const [resumeCollectionAlbums, setResumeCollectionAlbums] = React.useState(settings.resumeCollectionAlbums);
 	const [completeAlbums, setCompleteAlbums] = React.useState(completeAlbumCount());
 	const [reindexStatus, setReindexStatus] = React.useState<string>();
+	const [identifyStatus, setIdentifyStatus] = React.useState<string>();
+	const [notIdentified, setNotIdentified] = React.useState<{ path: string; reason?: string }[]>([]);
+	const [wideNext, setWideNext] = React.useState(false);
+	const [identified, setIdentified] = React.useState<IdentifyResult["found"]>([]);
+	const [replaceStatus, setReplaceStatus] = React.useState<string>();
 
 	return (
 		<LunaSettings>
@@ -182,19 +189,124 @@ export const Settings = () => {
 						)}
 					</>
 				}
+				sx={{ whiteSpace: "nowrap", flexShrink: 0, minWidth: "max-content" }}
 				disabled={defaultPath === undefined || reindexStatus === "Re-indexing…"}
 				onClick={async () => {
 					if (settings.defaultPath === undefined) return;
 					setReindexStatus("Re-indexing…");
 					try {
 						const result = await reindexFromLibrary(settings.defaultPath);
-						setReindexStatus(`Indexed ${Object.keys(result.entries).length} track(s) from ${result.scanned} FLAC file(s); ${result.withoutId} without a TIDAL id.`);
+						setReindexStatus(
+							`Indexed ${Object.keys(result.entries).length} track(s) from ${result.scanned} FLAC file(s); ${result.withoutId} without a TIDAL id` +
+								(result.sameAudioAsIdentified.length ? `, ${result.sameAudioAsIdentified.length} of them identical to a file that has one (duplicates).` : "."),
+						);
 					} catch (error) {
 						setReindexStatus(`Re-index failed: ${String(error)}`);
 					}
 				}}
 				children="Re-index"
 			/>
+			<LunaButtonSetting
+				title="Identify files without TIDAL id"
+				desc={
+					<>
+						Looks up each FLAC that carries no TIDAL id on TIDAL by artist and title, then with the album name (stopping at the first 429), and adds the certain matches to the download index, so they are not downloaded again. Files are never changed here.
+						{wideNext && (
+							<>
+								<br />
+								<b>Next run searches wider:</b> the same recording from another album is accepted when title, artist and length (±1 s) match.
+							</>
+						)}
+						{identifyStatus && (
+							<>
+								<br />
+								{identifyStatus}
+							</>
+						)}
+						{notIdentified.length > 0 && (
+							<ul style={{ margin: "4px 0 0", paddingLeft: 20 }}>
+								{notIdentified.map(({ path, reason }) => (
+									<li key={path}>
+										{path}
+										{reason && <div style={{ opacity: 0.75 }}>{reason}</div>}
+									</li>
+								))}
+							</ul>
+						)}
+					</>
+				}
+				sx={{ whiteSpace: "nowrap", flexShrink: 0, minWidth: "max-content" }}
+				disabled={defaultPath === undefined || identifyStatus?.startsWith("Looking up")}
+				onClick={async () => {
+					const root = settings.defaultPath;
+					if (root === undefined) return;
+					const broad = wideNext;
+					setNotIdentified([]);
+					setIdentifyStatus("Looking up files…");
+					try {
+						const result = await identifyLibraryFiles(
+							root,
+							(done, total, phase) => setIdentifyStatus(`Looking up ${Math.min(done + 1, total)} / ${total} – ${phase}${broad ? ", wide" : ""}…`),
+							{ broad },
+						);
+						const rest = result.notFound.length;
+						const otherAlbum = result.found.filter((f) => f.fromOtherAlbum).length;
+						setIdentifyStatus(
+							`${broad ? "Wide search: identified" : "Identified"} ${result.found.length} file(s)` +
+								(otherAlbum ? ` (${otherAlbum} from another album)` : "") +
+								(result.sameAudioAsIdentified.length ? `; ${result.sameAudioAsIdentified.length} duplicate(s) of files that have an id` : "") +
+								(rest ? `; ${rest} not identified${result.stoppedByRateLimit ? " (stopped: TIDAL answered 429, try again later)" : ""}` : "") +
+								(rest || result.sameAudioAsIdentified.length ? ":" : "."),
+						);
+						const relativePath = (path: string) => path.slice(root.length).replace(/^[\/]/, "");
+						setNotIdentified([
+							...result.sameAudioAsIdentified.map((d) => ({ path: relativePath(d.path), reason: `duplicate: same audio as ${relativePath(d.identifiedPath)}` })),
+							...result.notFound.map((f) => ({ path: relativePath(f.path), reason: f.reason })),
+						]);
+						setIdentified(result.found);
+						setReplaceStatus(undefined);
+						setWideNext(!broad && rest > 0 && !result.stoppedByRateLimit);
+					} catch (error) {
+						setIdentifyStatus(`Lookup failed: ${String(error)}`);
+					}
+				}}
+				children={wideNext ? "Search wider" : "Identify"}
+			/>
+			{identified.length > 0 && (
+				<LunaButtonSetting
+					title="Replace identified files with TIDAL downloads"
+					desc={
+						<>
+							Downloads the {identified.length} identified track(s) from TIDAL with the TIDAL id, cover and tags embedded, and puts each one in place of the old file under the same name. The old files move to _SongDownloader_Quarantine; nothing is deleted. A track TIDAL only serves as Atmos or non-FLAC is skipped.
+							{identified.some((f) => f.fromOtherAlbum) && " Files matched from another album get that album's copy of the same recording."}
+							{replaceStatus && (
+								<>
+									<br />
+									{replaceStatus}
+								</>
+							)}
+						</>
+					}
+					sx={{ whiteSpace: "nowrap", flexShrink: 0, minWidth: "max-content" }}
+					disabled={defaultPath === undefined || replaceStatus?.startsWith("Replacing")}
+					onClick={async () => {
+						const root = settings.defaultPath;
+						if (root === undefined) return;
+						setReplaceStatus("Replacing…");
+						try {
+							const result = await replaceIdentifiedFiles(root, identified, (done, total) => setReplaceStatus(`Replacing ${done} / ${total}…`));
+							setReplaceStatus(
+								`Replaced ${result.replaced} file(s).` +
+									(result.skipped.length ? ` Skipped: ${result.skipped.map((s) => `${s.path.slice(root.length + 1)} (${s.reason})`).join("; ")}` : ""),
+							);
+							setIdentified(identified.filter((f) => result.skipped.some((s) => s.path === f.path)));
+						} catch (error) {
+							setReplaceStatus(`Replace failed: ${String(error)}`);
+						}
+					}}
+					children="Replace"
+				/>
+			)}
 			<LunaTextSetting
 				title="Cover filename format"
 				desc={

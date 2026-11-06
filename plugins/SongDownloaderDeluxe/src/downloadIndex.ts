@@ -54,6 +54,15 @@ export const reindexFromLibrary = async (root: string) => {
 	return result;
 };
 
+/** Index entries found some other way (a TIDAL lookup of files that carry no id). */
+export const addIndexEntries = (entries: Record<string, DownloadPath>) => {
+	downloadIndex = { ...downloadIndex, ...entries };
+	const snapshot = downloadIndex;
+	return queueIndexSave(async () => {
+		await storage.set(storageKey, snapshot);
+	});
+};
+
 /**
  * Albums whose every track was found on disk. The startup Collection scan skips them without asking
  * TIDAL anything, which is most of a large Collection after the first scan.

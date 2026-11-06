@@ -5,10 +5,10 @@ import { makeAlbumCreditsText, makeAlbumCreditsTextForAlbum } from "./credits";
 import { getIndexedDownloadPath, isAlbumComplete, markAlbumComplete, rememberDownloadedTrack, reindexFromLibrary } from "./downloadIndex";
 import { logDownload, type DownloadLogEntry } from "./downloadLog";
 import { safeDownload, safeDownloadProgress } from "./download.native";
-import { audioFileExists, fileExists, saveCoverArt, saveTextFileNextToAudio } from "./files.native";
+import { audioFileExists, fileExists, replaceWithQuarantine, saveCoverArt, saveTextFileNextToAudio } from "./files.native";
+import { setTidalReplacer } from "./identifyLibrary";
 import {
 	applyTagFormat,
-	addAtmosFolderSuffix,
 	getCoverFileName,
 	getCreditsFileName,
 	getDownloadFolder,
@@ -17,9 +17,10 @@ import {
 	getFileName,
 	getStablePathTags,
 	formatTidalTitle,
+	type ArchiveTagValues,
 	type TagValues,
-	withAtmosVariant,
 } from "./helpers";
+import { addFolderVariants, formatVariantSuffix, technicalVariants } from "./archiveLayout";
 import { settings } from "./Settings";
 
 import styles from "file://downloadButton.css?minify";
@@ -145,6 +146,58 @@ const getActualDownloadFormat = ({ playbackInfo, quality }: ResolvedPlayback) =>
 	return { isAtmos, downloadedAudio: isAtmos ? "Dolby Atmos" : qualityLabels[quality] };
 };
 
+type AlbumMarkers = { hiRes: boolean; realMax: boolean };
+const albumMarkers = new Map<string, Promise<AlbumMarkers>>();
+const hasHiResMaster = (item: MediaItem) => item.tidalItem.mediaMetadata?.tags?.includes("HIRES_LOSSLESS") === true;
+
+/**
+ * Album-wide markers, decided before the first file is written so one album never splits across
+ * folders: [Hi-Res] only when every track has a Hi-Res master on TIDAL, [RealMAX] only when RealMAX
+ * replaces every track; an album where it replaces some tracks is a mix and gets neither. `scanRealMax` false (single favorites) skips the RealMAX lookups and
+ * judges the album's own tracks. Lookups are memoized by Luna, so the download loop reuses them.
+ */
+const getAlbumMarkers = (album: Album, scanRealMax = settings.useRealMAX) => {
+	const key = `${album.id}:${scanRealMax}:${settings.downloadQuality}`;
+	let markers = albumMarkers.get(key);
+	if (markers === undefined) {
+		markers = (async () => {
+			const tracks: MediaItem[] = [];
+			let replaced = 0;
+			for await (const item of await album.mediaItems()) {
+				if (item.contentType !== "track") continue;
+				const chosen = scanRealMax ? ((await item.max()) ?? item) : item;
+				if (chosen.id !== item.id) replaced++;
+				tracks.push(chosen);
+			}
+			// A mix (RealMAX replaced only some tracks) gets neither marker.
+			const mix = replaced > 0 && replaced < tracks.length;
+			const wantsHiRes = settings.downloadQuality === "HI_RES_LOSSLESS" || settings.downloadQuality === "HI_RES";
+			return {
+				hiRes: !mix && wantsHiRes && tracks.length > 0 && tracks.every(hasHiResMaster),
+				realMax: tracks.length > 0 && replaced === tracks.length,
+			};
+		})();
+		albumMarkers.set(key, markers);
+		markers.catch(() => albumMarkers.delete(key));
+	}
+	return markers;
+};
+
+/** The bracket markers after the year: Atmos and AAC from the delivered stream, Hi-Res and RealMAX album-wide. */
+const getPathVariants = ({ playbackInfo, quality }: ResolvedPlayback, album: AlbumMarkers) =>
+	technicalVariants({
+		atmos: playbackInfo.audioMode === "DOLBY_ATMOS",
+		lossy: [quality, playbackInfo.audioQuality].some((value) => value === "HIGH" || value === "LOW"),
+		bitDepth: album.hiRes ? 24 : 16,
+		realMax: album.realMax,
+	});
+
+/** Markers for a track without a known album object: its own album, judged without RealMAX lookups. */
+const getTrackAlbumMarkers = async (item: MediaItem, album?: Album, scanRealMax?: boolean): Promise<AlbumMarkers> => {
+	const resolved = album ?? (await item.album());
+	return resolved === undefined ? { hiRes: false, realMax: false } : getAlbumMarkers(resolved, scanRealMax);
+};
+
 type DownloadTagInfo = Awaited<ReturnType<MediaItem["flacTags"]>>;
 
 const downloadWithRetry = async (
@@ -249,8 +302,9 @@ const queueFavoriteDownload = (
 			logEntry.title = String(tags.title ?? "");
 			logEntry.album ??= archiveTags.album;
 			const resolvedPlayback = await resolvePlaybackInfo(mediaItem);
-			const { isAtmos, downloadedAudio } = getActualDownloadFormat(resolvedPlayback);
-			const presentationTags = isAtmos ? withAtmosVariant(archiveTags) : archiveTags;
+			const { downloadedAudio } = getActualDownloadFormat(resolvedPlayback);
+			const variants = getPathVariants(resolvedPlayback, await getTrackAlbumMarkers(sourceMediaItem, sourceAlbum, isAlbumTrack && settings.useRealMAX));
+			const presentationTags: ArchiveTagValues = { ...archiveTags, variantSuffix: formatVariantSuffix(variants) };
 			// Disc layout follows the chosen TIDAL release, not the RealMAX substitute.
 			multiDiscAlbum ??= ((await sourceMediaItem.album())?.tidalAlbum.numberOfVolumes ?? 1) > 1;
 			let fileName = await getFileName(
@@ -261,7 +315,7 @@ const queueFavoriteDownload = (
 				getFileExtension(resolvedPlayback.playbackInfo),
 				presentationTags,
 			);
-			if (isAtmos) fileName = addAtmosFolderSuffix(fileName, multiDiscAlbum);
+			fileName = addFolderVariants(fileName, variants, multiDiscAlbum);
 			const audioPath = [libraryBase, fileName];
 			const indexedPath = getIndexedDownloadPath(itemId);
 			if (startupResume && indexedPath !== undefined && (await audioFileExists(indexedPath))) {
@@ -439,6 +493,38 @@ const resumeCollectionAlbums = (albumIds: redux.ItemId[]) => {
 
 if (favoriteStateHydrated) queueMicrotask(() => resumeCollectionAlbums(initialFavorites.albums));
 
+// "Identify files without TIDAL id" → Replace: a fresh TIDAL download takes the old file's place, and
+// the old file goes to quarantine. Only lossless stereo FLAC replaces a FLAC; anything else is skipped.
+setTidalReplacer(async (root, trackId, path) => {
+	await waitForRateLimit();
+	const mediaItem = await MediaItem.fromId(trackId, "track");
+	if (mediaItem === undefined) return "TIDAL no longer has this track";
+	const { tags, coverUrl } = await mediaItem.flacTags();
+	const archiveTags = await getStablePathTags(mediaItem, tags);
+	const resolvedPlayback = await resolvePlaybackInfo(mediaItem);
+	const { isAtmos, downloadedAudio } = getActualDownloadFormat(resolvedPlayback);
+	if (isAtmos || getFileExtension(resolvedPlayback.playbackInfo) !== "flac") return `TIDAL serves it as ${downloadedAudio ?? "non-FLAC"}, kept the existing file`;
+	const temporaryPath = path.replace(/\.flac$/i, ".tidal-new.flac");
+	const delivered = await downloadWithRetry(mediaItem, temporaryPath, resolvedPlayback, { tags: getEmbeddedTags(archiveTags), coverUrl });
+	const quarantined = await replaceWithQuarantine(root, path, temporaryPath);
+	noteSuccess(`track:${trackId}`);
+	await afterAudioSaved(`download index for ${archiveTags.title}`, () => rememberDownloadedTrack(trackId, path));
+	await logDownload(root, {
+		source: "manual",
+		status: "downloaded",
+		trackId,
+		artist: archiveTags.artist?.[0],
+		album: archiveTags.album,
+		title: String(archiveTags.title ?? ""),
+		requested: settings.downloadQuality,
+		delivered,
+		file: path,
+		details: `replaced a file without TIDAL id; old copy: ${quarantined}`,
+	});
+	trace.log(`Replaced with TIDAL download: ${path}`);
+	return undefined;
+});
+
 unloads.add(
 	redux.store.subscribe(() => {
 		const favorites = redux.store.getState().favorites;
@@ -501,14 +587,15 @@ ContextMenu.onMediaItem(unloads, async ({ mediaCollection, contextMenu }) => {
 			const tags = await getStablePathTags(firstMediaItem, enrichedTags, albumTagOverrides);
 			const multiDiscAlbum = mediaCollection.tidalAlbum.numberOfVolumes > 1;
 			const resolvedPlayback = await resolvePlaybackInfo(firstMediaItem);
-			const { isAtmos, downloadedAudio } = getActualDownloadFormat(resolvedPlayback);
-			const presentationTags = isAtmos ? withAtmosVariant(tags) : tags;
+			const { downloadedAudio } = getActualDownloadFormat(resolvedPlayback);
+			const variants = getPathVariants(resolvedPlayback, await getAlbumMarkers(mediaCollection));
+			const presentationTags: ArchiveTagValues = { ...tags, variantSuffix: formatVariantSuffix(variants) };
 			let audioPath: string | string[];
 			const libraryBase = settings.defaultPath;
 			if (libraryBase !== undefined) {
 				const pathFormat = multiDiscAlbum ? settings.multiDiscPathFormat : settings.pathFormat;
 				let relativePath = `${applyTagFormat(pathFormat, presentationTags)}.flac`;
-				if (isAtmos) relativePath = addAtmosFolderSuffix(relativePath, multiDiscAlbum);
+				relativePath = addFolderVariants(relativePath, variants, multiDiscAlbum);
 				audioPath = [libraryBase, relativePath];
 			} else {
 				const selectedFolder = await getDownloadFolder();
@@ -554,10 +641,17 @@ ContextMenu.onMediaItem(unloads, async ({ mediaCollection, contextMenu }) => {
 		let skippedCount = 0;
 		const sourceAlbum = mediaCollection instanceof Album ? mediaCollection : undefined;
 		const albumTagOverrides = sourceAlbum === undefined ? undefined : await getAlbumTagOverrides(sourceAlbum);
+		// An album is judged as a whole; a playlist track by its own album, without RealMAX lookups on it.
+		const collectionMarkers = (item: MediaItem) =>
+			sourceAlbum !== undefined ? getAlbumMarkers(sourceAlbum) : getTrackAlbumMarkers(item, undefined, false);
 		const sourceIsMultiDisc = sourceAlbum?.tidalAlbum.numberOfVolumes !== undefined
 			? sourceAlbum.tidalAlbum.numberOfVolumes > 1
 			: undefined;
 		try {
+			if (sourceAlbum !== undefined) {
+				downloadButton.text = settings.useRealMAX ? `Checking RealMax...` : `Checking album quality...`;
+				await getAlbumMarkers(sourceAlbum);
+			}
 			for await (let mediaItem of await mediaCollection.mediaItems()) {
 				if (downloadState.cancel) break;
 				const sourceMediaItem = mediaItem;
@@ -574,8 +668,9 @@ ContextMenu.onMediaItem(unloads, async ({ mediaCollection, contextMenu }) => {
 				const coverUrl = sourceTagInfo.coverUrl ?? downloadedTagInfo.coverUrl;
 				const archiveTags = await getStablePathTags(sourceMediaItem, tags, albumTagOverrides);
 				const resolvedPlayback = await resolvePlaybackInfo(mediaItem);
-				const { isAtmos, downloadedAudio } = getActualDownloadFormat(resolvedPlayback);
-				const presentationTags = isAtmos ? withAtmosVariant(archiveTags) : archiveTags;
+				const { downloadedAudio } = getActualDownloadFormat(resolvedPlayback);
+				const variants = getPathVariants(resolvedPlayback, await collectionMarkers(sourceMediaItem));
+				const presentationTags: ArchiveTagValues = { ...archiveTags, variantSuffix: formatVariantSuffix(variants) };
 				const multiDiscAlbum = sourceIsMultiDisc ?? (((await mediaItem.album())?.tidalAlbum.numberOfVolumes ?? 1) > 1);
 
 				downloadButton.text = `Fetching filename...`;
@@ -587,7 +682,7 @@ ContextMenu.onMediaItem(unloads, async ({ mediaCollection, contextMenu }) => {
 					getFileExtension(resolvedPlayback.playbackInfo),
 					presentationTags,
 				);
-				if (isAtmos) fileName = addAtmosFolderSuffix(fileName, multiDiscAlbum);
+				fileName = addFolderVariants(fileName, variants, multiDiscAlbum);
 
 				downloadButton.text = `Fetching download path...`;
 				const path = downloadFolder !== undefined ? [downloadFolder, fileName] : await getDownloadPath(fileName);

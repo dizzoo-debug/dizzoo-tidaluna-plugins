@@ -1,5 +1,5 @@
-import { access, appendFile, constants, mkdir, stat, writeFile } from "fs/promises";
-import { dirname, join } from "path";
+import { access, appendFile, constants, mkdir, rename, stat, writeFile } from "fs/promises";
+import { dirname, join, relative } from "path";
 
 const resolvePath = (filePath: string | string[]) => (Array.isArray(filePath) ? join(...filePath) : filePath);
 
@@ -54,6 +54,27 @@ export const saveTextFileNextToAudio = async (
 		if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
 		throw error;
 	}
+};
+
+/**
+ * Puts a freshly downloaded file in place of an existing one. The old file is never deleted: it moves
+ * to <root>/_SongDownloader_Quarantine under its own relative path (numbered if that is taken).
+ */
+export const replaceWithQuarantine = async (root: string, oldPath: string, newPath: string) => {
+	if (!(await audioFileExists(newPath))) throw new Error(`Downloaded file is missing: ${newPath}`);
+	const base = join(root, "_SongDownloader_Quarantine", relative(root, oldPath));
+	let quarantinePath = base;
+	for (let n = 2; await fileExists(quarantinePath); n++) quarantinePath = base.replace(/(\.[^.\\/]+)?$/, ` (${n})$1`);
+	await mkdir(dirname(quarantinePath), { recursive: true });
+	await rename(oldPath, quarantinePath);
+	try {
+		await rename(newPath, oldPath);
+	} catch (error) {
+		// Put the original back rather than leave a hole in the album.
+		await rename(quarantinePath, oldPath).catch(() => undefined);
+		throw error;
+	}
+	return quarantinePath;
 };
 
 export const appendDownloadLog = async (rootPath: string, fileName: string, header: string, line: string) => {
