@@ -84,24 +84,25 @@ export const readFlacInfo = async (path: string): Promise<FlacInfo | undefined> 
 export const readFlacTidalId = async (path: string) => (await readFlacInfo(path))?.tidalId;
 
 /** What a FLAC without a TIDAL id says about itself, for looking it up on TIDAL. */
-export type UnidentifiedFile = { path: string; title?: string; artist?: string; album?: string; durationSeconds?: number };
+export type UnidentifiedFile = { path: string; title?: string; artist?: string; album?: string; durationSeconds?: number; audioMd5?: string };
 
 /**
  * Tags first; a file without tags falls back to the library layout,
- * "Artist/Artist - Album (year)/01 - Artist - Title.flac".
+ * "Artist/Artist - Album (year)/01 - Artist - Title.flac", or "01 - Title.flac" with the artist
+ * taken from the album folder.
  */
 export const describeUnidentified = (path: string, info: FlacInfo): UnidentifiedFile => {
-	const fileMatch = basename(path)
-		.replace(/\.flac$/i, "")
-		.match(/^\d+\s*-\s*(.+?)\s+-\s+(.+)$/);
+	const name = basename(path).replace(/\.flac$/i, "");
+	const fileMatch = name.match(/^\d+\s*-\s*(.+?)\s+-\s+(.+)$/) ?? name.match(/^\d+\s*-\s*()(.+)$/);
 	const folder = basename(dirname(path)).replace(/^CD\d+$/i, () => basename(dirname(dirname(path))));
 	const folderMatch = folder.match(/^(.+?) - (.+?)(?: \(\d{4}\))?(?: \[[^\]]+\])*$/);
 	return {
 		path,
 		title: info.tags.TITLE ?? fileMatch?.[2],
-		artist: info.tags.ARTIST ?? info.tags.ALBUMARTIST ?? fileMatch?.[1] ?? folderMatch?.[1],
+		artist: info.tags.ARTIST ?? info.tags.ALBUMARTIST ?? (fileMatch?.[1] || undefined) ?? folderMatch?.[1],
 		album: info.tags.ALBUM ?? folderMatch?.[2],
 		durationSeconds: info.durationSeconds,
+		audioMd5: info.audioMd5,
 	};
 };
 

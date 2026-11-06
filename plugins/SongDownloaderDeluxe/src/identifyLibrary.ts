@@ -1,6 +1,6 @@
 import { TidalApi } from "@luna/lib";
 
-import { addIndexEntries, reindexFromLibrary } from "./downloadIndex";
+import { addIndexEntries, isKeptOutsideTidal, reindexFromLibrary } from "./downloadIndex";
 import { identifyOnTidal, type IdentifyPhase, type IdentifyResult, type TrackCandidate } from "./identify";
 
 const searchTracks = async (query: string): Promise<TrackCandidate[]> => {
@@ -20,9 +20,10 @@ export const identifyLibraryFiles = async (
 	options: { broad?: boolean } = {},
 ) => {
 	const { unidentified, sameAudioAsIdentified } = await reindexFromLibrary(root);
-	const result = await identifyOnTidal(unidentified, searchTracks, onProgress, options);
+	const toLookUp = unidentified.filter((file) => !isKeptOutsideTidal(file));
+	const result = await identifyOnTidal(toLookUp, searchTracks, onProgress, options);
 	if (result.found.length > 0) await addIndexEntries(Object.fromEntries(result.found.map((f) => [f.id, f.path])));
-	return { ...result, sameAudioAsIdentified };
+	return { ...result, sameAudioAsIdentified, keptOutsideTidal: unidentified.length - toLookUp.length };
 };
 
 /** Downloads one TIDAL track over an existing file; set by the plugin entry, which owns the download code. */

@@ -3,7 +3,7 @@ import { MediaItem, Quality, type redux } from "@luna/lib";
 import { LunaButtonSetting, LunaSelectItem, LunaSelectSetting, LunaSettings, LunaSwitchSetting, LunaTextSetting, LunaTitle } from "@luna/ui";
 
 import React from "react";
-import { clearCompleteAlbums, completeAlbumCount, reindexFromLibrary } from "./downloadIndex";
+import { clearCompleteAlbums, completeAlbumCount, keepOutsideTidal, reindexFromLibrary } from "./downloadIndex";
 import { getDownloadFolder } from "./helpers";
 import type { IdentifyResult } from "./identify";
 import { identifyLibraryFiles, replaceIdentifiedFiles } from "./identifyLibrary";
@@ -113,6 +113,8 @@ export const Settings = () => {
 	const [wideNext, setWideNext] = React.useState(false);
 	const [identified, setIdentified] = React.useState<IdentifyResult["found"]>([]);
 	const [replaceStatus, setReplaceStatus] = React.useState<string>();
+	const [notFound, setNotFound] = React.useState<IdentifyResult["notFound"]>([]);
+	const [keepStatus, setKeepStatus] = React.useState<string>();
 
 	return (
 		<LunaSettings>
@@ -255,6 +257,7 @@ export const Settings = () => {
 							`${broad ? "Wide search: identified" : "Identified"} ${result.found.length} file(s)` +
 								(otherAlbum ? ` (${otherAlbum} from another album)` : "") +
 								(result.sameAudioAsIdentified.length ? `; ${result.sameAudioAsIdentified.length} duplicate(s) of files that have an id` : "") +
+								(result.keptOutsideTidal ? `; ${result.keptOutsideTidal} archive file(s) skipped` : "") +
 								(rest ? `; ${rest} not identified${result.stoppedByRateLimit ? " (stopped: TIDAL answered 429, try again later)" : ""}` : "") +
 								(rest || result.sameAudioAsIdentified.length ? ":" : "."),
 						);
@@ -264,6 +267,9 @@ export const Settings = () => {
 							...result.notFound.map((f) => ({ path: relativePath(f.path), reason: f.reason })),
 						]);
 						setIdentified(result.found);
+						// Files a 429 kept from being searched are not offered for keeping.
+						setNotFound(result.notFound.filter((f) => !f.reason?.startsWith("not searched")));
+						setKeepStatus(undefined);
 						setReplaceStatus(undefined);
 						setWideNext(!broad && rest > 0 && !result.stoppedByRateLimit);
 					} catch (error) {
@@ -305,6 +311,30 @@ export const Settings = () => {
 						}
 					}}
 					children="Replace"
+				/>
+			)}
+			{notFound.length > 0 && (
+				<LunaButtonSetting
+					title="Keep not identified files as archive files"
+					desc={
+						<>
+							Marks the {notFound.length} file(s) TIDAL did not identify as archive files that are not from TIDAL: they stay in the library as they are and Identify no longer looks them up. Recognised by their audio, so renaming or moving them keeps the mark.
+							{keepStatus && (
+								<>
+									<br />
+									{keepStatus}
+								</>
+							)}
+						</>
+					}
+					sx={{ whiteSpace: "nowrap", flexShrink: 0, minWidth: "max-content" }}
+					onClick={async () => {
+						await keepOutsideTidal(notFound);
+						setKeepStatus(`Kept ${notFound.length} file(s) as archive files.`);
+						setNotFound([]);
+						setNotIdentified((list) => list.filter((item) => item.reason?.startsWith("duplicate:")));
+					}}
+					children="Keep"
 				/>
 			)}
 			<LunaTextSetting

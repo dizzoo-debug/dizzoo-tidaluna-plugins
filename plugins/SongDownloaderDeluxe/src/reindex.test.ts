@@ -3,7 +3,14 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { readFlacTidalId, reindexLibrary, tidalIdFromVorbisComment } from "./reindex.native";
+import { describeUnidentified, readFlacTidalId, reindexLibrary, tidalIdFromVorbisComment } from "./reindex.native";
+
+// A file without tags and without the artist in its name: title from the name, artist from the folder.
+const bare = describeUnidentified("D:/M/The Chemical Brothers/The Chemical Brothers - Surrender (1999)/02 - Under The Influence.flac", { tags: {} });
+assert.equal(bare.title, "Under The Influence");
+assert.equal(bare.artist, "The Chemical Brothers");
+assert.equal(bare.album, "Surrender");
+assert.equal(describeUnidentified("D:/M/A/A - B (2000)/01 - Michael Stearns - Finale.flac", { tags: {} }).artist, "Michael Stearns");
 
 const vorbisComment = (entries: string[]) => {
 	const parts = [Buffer.from([4, 0, 0, 0]), Buffer.from("test")];

@@ -54,6 +54,22 @@ export const reindexFromLibrary = async (root: string) => {
 	return result;
 };
 
+/**
+ * Archive files that are not from TIDAL and stay as they are: never looked up again. Kept by audio
+ * MD5, so a renamed or moved file is still recognised; by path when the file has no MD5.
+ */
+const keptOutsideTidalKey = "SongDownloaderDeluxeKeptOutsideTidal";
+let keptOutsideTidal = new Set((await storage.get<string[]>(keptOutsideTidalKey)) ?? []);
+const keptKey = (file: { path: string; audioMd5?: string }) => file.audioMd5 ?? file.path;
+export const isKeptOutsideTidal = (file: { path: string; audioMd5?: string }) => keptOutsideTidal.has(keptKey(file));
+export const keepOutsideTidal = (files: { path: string; audioMd5?: string }[]) => {
+	keptOutsideTidal = new Set([...keptOutsideTidal, ...files.map(keptKey)]);
+	const snapshot = [...keptOutsideTidal];
+	return queueIndexSave(async () => {
+		await storage.set(keptOutsideTidalKey, snapshot);
+	});
+};
+
 /** Index entries found some other way (a TIDAL lookup of files that carry no id). */
 export const addIndexEntries = (entries: Record<string, DownloadPath>) => {
 	downloadIndex = { ...downloadIndex, ...entries };
