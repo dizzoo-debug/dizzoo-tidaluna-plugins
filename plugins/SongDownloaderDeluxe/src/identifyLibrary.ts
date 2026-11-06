@@ -20,10 +20,12 @@ export const identifyLibraryFiles = async (
 	options: { broad?: boolean } = {},
 ) => {
 	const { unidentified, sameAudioAsIdentified } = await reindexFromLibrary(root);
-	const toLookUp = unidentified.filter((file) => !isKeptOutsideTidal(file));
+	// The wider search looks up the files kept as archive files too.
+	const toLookUp = options.broad ? unidentified : unidentified.filter((file) => !isKeptOutsideTidal(file));
 	const result = await identifyOnTidal(toLookUp, searchTracks, onProgress, options);
 	if (result.found.length > 0) await addIndexEntries(Object.fromEntries(result.found.map((f) => [f.id, f.path])));
-	return { ...result, sameAudioAsIdentified, keptOutsideTidal: unidentified.length - toLookUp.length };
+	const keptOutsideTidal = unidentified.filter((file) => !toLookUp.includes(file)).map((file) => file.path);
+	return { ...result, sameAudioAsIdentified, keptOutsideTidal };
 };
 
 /** Downloads one TIDAL track over an existing file; set by the plugin entry, which owns the download code. */

@@ -72,7 +72,7 @@ export const checkTidalMatch = (file: UnidentifiedFile, candidates: TrackCandida
 export const pickTidalMatch = (file: UnidentifiedFile, candidates: TrackCandidate[], broad = false) => checkTidalMatch(file, candidates, broad).match;
 
 export type IdentifyResult = {
-	found: { path: string; id: string; title: string; album?: string; fromOtherAlbum?: boolean }[];
+	found: { path: string; audioMd5?: string; id: string; title: string; album?: string; fromOtherAlbum?: boolean }[];
 	notFound: (UnidentifiedFile & { reason?: string })[];
 	stoppedByRateLimit: boolean;
 };
@@ -114,7 +114,7 @@ export const identifyOnTidal = async (
 				check = second.match ? second : { reason: [check.reason, second.reason].filter(Boolean).join("; ") };
 			}
 			if (check.match)
-				result.found.push({ path: file.path, id: String(check.match.id), title: check.match.title, album: check.match.album?.title, fromOtherAlbum: check.fromOtherAlbum });
+				result.found.push({ path: file.path, audioMd5: file.audioMd5, id: String(check.match.id), title: check.match.title, album: check.match.album?.title, fromOtherAlbum: check.fromOtherAlbum });
 			else result.notFound.push({ ...file, reason: check.reason });
 		} catch (error) {
 			if (/\b429\b|too many requests/i.test(String(error))) result.stoppedByRateLimit = true;

@@ -109,12 +109,57 @@ export const Settings = () => {
 	const [completeAlbums, setCompleteAlbums] = React.useState(completeAlbumCount());
 	const [reindexStatus, setReindexStatus] = React.useState<string>();
 	const [identifyStatus, setIdentifyStatus] = React.useState<string>();
-	const [notIdentified, setNotIdentified] = React.useState<{ path: string; reason?: string }[]>([]);
-	const [wideNext, setWideNext] = React.useState(false);
+	const [identifyList, setIdentifyList] = React.useState<{ path: string; reason?: string }[]>([]);
+	const [identifyRan, setIdentifyRan] = React.useState(false);
 	const [identified, setIdentified] = React.useState<IdentifyResult["found"]>([]);
 	const [replaceStatus, setReplaceStatus] = React.useState<string>();
 	const [notFound, setNotFound] = React.useState<IdentifyResult["notFound"]>([]);
 	const [keepStatus, setKeepStatus] = React.useState<string>();
+
+	const relativePath = (path: string) => path.slice(settings.defaultPath?.length ?? 0).replace(/^[\\/]/, "");
+	const runIdentify = async (broad: boolean) => {
+		const root = settings.defaultPath;
+		if (root === undefined) return;
+		setIdentifyList([]);
+		setIdentifyStatus("Looking up files…");
+		try {
+			const result = await identifyLibraryFiles(
+				root,
+				(done, total, phase) => setIdentifyStatus(`Looking up ${Math.min(done + 1, total)} / ${total} – ${phase}${broad ? ", wide" : ""}…`),
+				{ broad },
+			);
+			const rest = result.notFound.length;
+			const otherAlbum = result.found.filter((f) => f.fromOtherAlbum).length;
+			setIdentifyStatus(
+				`${broad ? "Wide search: identified" : "Identified"} ${result.found.length} file(s)` +
+					(otherAlbum ? ` (${otherAlbum} from another album)` : "") +
+					(result.sameAudioAsIdentified.length ? `; ${result.sameAudioAsIdentified.length} duplicate(s) of files that have an id` : "") +
+					(result.keptOutsideTidal.length ? `; ${result.keptOutsideTidal.length} archive file(s) skipped` : "") +
+					(rest ? `; ${rest} not identified${result.stoppedByRateLimit ? " (stopped: TIDAL answered 429, try again later)" : ""}` : "") +
+					(rest || result.found.length || result.keptOutsideTidal.length || result.sameAudioAsIdentified.length ? ":" : "."),
+			);
+			// One list in library order, each file with what Identify found for it.
+			setIdentifyList(
+				[
+					...result.found.map((f) => ({
+						path: relativePath(f.path),
+						reason: `identified: ${f.title}${f.album ? ` – ${f.album}` : ""} (TIDAL ${f.id})${f.fromOtherAlbum ? ", from another album" : ""}`,
+					})),
+					...result.keptOutsideTidal.map((path) => ({ path: relativePath(path), reason: "archive file, not looked up (Search wider looks it up)" })),
+					...result.sameAudioAsIdentified.map((d) => ({ path: relativePath(d.path), reason: `duplicate: same audio as ${relativePath(d.identifiedPath)}` })),
+					...result.notFound.map((f) => ({ path: relativePath(f.path), reason: f.reason })),
+				].sort((a, b) => a.path.localeCompare(b.path)),
+			);
+			setIdentified(result.found);
+			// Files a 429 kept from being searched are not offered for keeping.
+			setNotFound(result.notFound.filter((f) => !f.reason?.startsWith("not searched")));
+			setKeepStatus(undefined);
+			setReplaceStatus(undefined);
+			setIdentifyRan(!result.stoppedByRateLimit);
+		} catch (error) {
+			setIdentifyStatus(`Lookup failed: ${String(error)}`);
+		}
+	};
 
 	return (
 		<LunaSettings>
@@ -213,21 +258,15 @@ export const Settings = () => {
 				desc={
 					<>
 						Looks up each FLAC that carries no TIDAL id on TIDAL by artist and title, then with the album name (stopping at the first 429), and adds the certain matches to the download index, so they are not downloaded again. Files are never changed here.
-						{wideNext && (
-							<>
-								<br />
-								<b>Next run searches wider:</b> the same recording from another album is accepted when title, artist and length (±1 s) match.
-							</>
-						)}
 						{identifyStatus && (
 							<>
 								<br />
 								{identifyStatus}
 							</>
 						)}
-						{notIdentified.length > 0 && (
+						{identifyList.length > 0 && (
 							<ul style={{ margin: "4px 0 0", paddingLeft: 20 }}>
-								{notIdentified.map(({ path, reason }) => (
+								{identifyList.map(({ path, reason }) => (
 									<li key={path}>
 										{path}
 										{reason && <div style={{ opacity: 0.75 }}>{reason}</div>}
@@ -239,45 +278,19 @@ export const Settings = () => {
 				}
 				sx={{ whiteSpace: "nowrap", flexShrink: 0, minWidth: "max-content" }}
 				disabled={defaultPath === undefined || identifyStatus?.startsWith("Looking up")}
-				onClick={async () => {
-					const root = settings.defaultPath;
-					if (root === undefined) return;
-					const broad = wideNext;
-					setNotIdentified([]);
-					setIdentifyStatus("Looking up files…");
-					try {
-						const result = await identifyLibraryFiles(
-							root,
-							(done, total, phase) => setIdentifyStatus(`Looking up ${Math.min(done + 1, total)} / ${total} – ${phase}${broad ? ", wide" : ""}…`),
-							{ broad },
-						);
-						const rest = result.notFound.length;
-						const otherAlbum = result.found.filter((f) => f.fromOtherAlbum).length;
-						setIdentifyStatus(
-							`${broad ? "Wide search: identified" : "Identified"} ${result.found.length} file(s)` +
-								(otherAlbum ? ` (${otherAlbum} from another album)` : "") +
-								(result.sameAudioAsIdentified.length ? `; ${result.sameAudioAsIdentified.length} duplicate(s) of files that have an id` : "") +
-								(result.keptOutsideTidal ? `; ${result.keptOutsideTidal} archive file(s) skipped` : "") +
-								(rest ? `; ${rest} not identified${result.stoppedByRateLimit ? " (stopped: TIDAL answered 429, try again later)" : ""}` : "") +
-								(rest || result.sameAudioAsIdentified.length ? ":" : "."),
-						);
-						const relativePath = (path: string) => path.slice(root.length).replace(/^[\/]/, "");
-						setNotIdentified([
-							...result.sameAudioAsIdentified.map((d) => ({ path: relativePath(d.path), reason: `duplicate: same audio as ${relativePath(d.identifiedPath)}` })),
-							...result.notFound.map((f) => ({ path: relativePath(f.path), reason: f.reason })),
-						]);
-						setIdentified(result.found);
-						// Files a 429 kept from being searched are not offered for keeping.
-						setNotFound(result.notFound.filter((f) => !f.reason?.startsWith("not searched")));
-						setKeepStatus(undefined);
-						setReplaceStatus(undefined);
-						setWideNext(!broad && rest > 0 && !result.stoppedByRateLimit);
-					} catch (error) {
-						setIdentifyStatus(`Lookup failed: ${String(error)}`);
-					}
-				}}
-				children={wideNext ? "Search wider" : "Identify"}
+				onClick={() => runIdentify(false)}
+				children="Identify"
 			/>
+			{identifyRan && (
+				<LunaButtonSetting
+					title="Search wider"
+					desc="Runs Identify again, deeper: the archive files are looked up too, and the same recording from another album is accepted when title, artist and length (±1 s) match. Then choose Replace or Keep below."
+					sx={{ whiteSpace: "nowrap", flexShrink: 0, minWidth: "max-content" }}
+					disabled={defaultPath === undefined || identifyStatus?.startsWith("Looking up")}
+					onClick={() => runIdentify(true)}
+					children="Search wider"
+				/>
+			)}
 			{identified.length > 0 && (
 				<LunaButtonSetting
 					title="Replace identified files with TIDAL downloads"
@@ -303,8 +316,10 @@ export const Settings = () => {
 							const result = await replaceIdentifiedFiles(root, identified, (done, total) => setReplaceStatus(`Replacing ${done} / ${total}…`));
 							setReplaceStatus(
 								`Replaced ${result.replaced} file(s).` +
-									(result.skipped.length ? ` Skipped: ${result.skipped.map((s) => `${s.path.slice(root.length + 1)} (${s.reason})`).join("; ")}` : ""),
+									(result.skipped.length ? ` Skipped: ${result.skipped.map((s) => `${relativePath(s.path)} (${s.reason})`).join("; ")}` : ""),
 							);
+							const replaced = new Set(identified.filter((f) => !result.skipped.some((s) => s.path === f.path)).map((f) => relativePath(f.path)));
+							setIdentifyList((list) => list.map((item) => (replaced.has(item.path) ? { ...item, reason: "replaced with the TIDAL download" } : item)));
 							setIdentified(identified.filter((f) => result.skipped.some((s) => s.path === f.path)));
 						} catch (error) {
 							setReplaceStatus(`Replace failed: ${String(error)}`);
@@ -313,12 +328,12 @@ export const Settings = () => {
 					children="Replace"
 				/>
 			)}
-			{notFound.length > 0 && (
+			{identified.length + notFound.length > 0 && (
 				<LunaButtonSetting
-					title="Keep not identified files as archive files"
+					title="Keep files as archive files"
 					desc={
 						<>
-							Marks the {notFound.length} file(s) TIDAL did not identify as archive files that are not from TIDAL: they stay in the library as they are and Identify no longer looks them up. Recognised by their audio, so renaming or moving them keeps the mark.
+							Keeps the {identified.length + notFound.length} listed file(s){identified.length > 0 && notFound.length > 0 && ` (${identified.length} identified, ${notFound.length} not identified)`} in the library as they are, instead of replacing them: Identify no longer looks them up, only Search wider does. Recognised by their audio, so renaming or moving them keeps the mark.
 							{keepStatus && (
 								<>
 									<br />
@@ -329,10 +344,13 @@ export const Settings = () => {
 					}
 					sx={{ whiteSpace: "nowrap", flexShrink: 0, minWidth: "max-content" }}
 					onClick={async () => {
-						await keepOutsideTidal(notFound);
-						setKeepStatus(`Kept ${notFound.length} file(s) as archive files.`);
+						const files = [...identified, ...notFound];
+						await keepOutsideTidal(files);
+						setKeepStatus(`Kept ${files.length} file(s) as archive files.`);
+						const kept = new Set(files.map((f) => relativePath(f.path)));
+						setIdentifyList((list) => list.map((item) => (kept.has(item.path) ? { ...item, reason: `${item.reason ? `${item.reason}; ` : ""}kept as archive file` } : item)));
+						setIdentified([]);
 						setNotFound([]);
-						setNotIdentified((list) => list.filter((item) => item.reason?.startsWith("duplicate:")));
 					}}
 					children="Keep"
 				/>
