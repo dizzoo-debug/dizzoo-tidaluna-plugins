@@ -6,6 +6,7 @@ import {
 	addEditionVariant,
 	formatVariantSuffix,
 	isVariousArtists,
+	libraryRootFor,
 	normalizeEdition,
 	sanitizeLibraryComponent,
 } from "./archiveLayout";
@@ -73,7 +74,7 @@ export const getStablePathTags = async (
 	const { archiveTitle, soundtrack } = normalizeEdition(album?.title ?? selectedAlbumTitle, album?.version, album?.genre);
 	const compilation = !soundtrack && isVariousArtists(albumArtistNames.filter(Boolean));
 
-	mergedTags.libraryRoot = soundtrack ? "!OST" : compilation ? "Various Artists" : albumArtist;
+	mergedTags.libraryRoot = libraryRootFor({ soundtrack, variousArtists: compilation, albumType: album?.type, albumArtist });
 	mergedTags.archiveAlbumArtist = compilation ? "Various Artists" : albumArtist;
 	mergedTags.archiveAlbumTitle = archiveTitle;
 	// Only technical markers go after the year (" [Atmos]", added later); editions are in the title.
@@ -89,6 +90,8 @@ export const applyTagFormat = (format: string, tags: ArchiveTagValues) =>
 		// " [Atmos]" or empty: keep the leading space and never turn an empty suffix into "Unknown".
 		if (tag === "variantSuffix") return tagValue.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "");
 		if (tag === "trackNumber") tagValue = tagValue.padStart(2, "0");
+		// "!Collections/Various Artists" is two folders: each part is sanitized on its own.
+		if (tag === "libraryRoot") return tagValue.split("/").map(sanitizeLibraryComponent).join("/");
 		return sanitizeLibraryComponent(tagValue);
 	});
 

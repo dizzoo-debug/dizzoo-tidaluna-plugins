@@ -4,6 +4,7 @@ import { Album, ContextMenu, getPlaybackInfo, MediaItem, redux, safeInterval, sa
 import { makeAlbumCreditsText, makeAlbumCreditsTextForAlbum } from "./credits";
 import { getIndexedDownloadPath, isAlbumComplete, markAlbumComplete, rememberDownloadedTrack, reindexFromLibrary } from "./downloadIndex";
 import { logDownload, type DownloadLogEntry } from "./downloadLog";
+import { atmosAvailable, getAtmosPlaybackInfo, hasAtmosLogin } from "./atmos";
 import { safeDownload, safeDownloadProgress } from "./download.native";
 import { audioFileExists, fileExists, replaceWithQuarantine, saveCoverArt, saveTextFileNextToAudio } from "./files.native";
 import { setTidalReplacer } from "./identifyLibrary";
@@ -99,6 +100,13 @@ const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resol
 type ResolvedPlayback = {
 	playbackInfo: NonNullable<Awaited<ReturnType<typeof getPlaybackInfo>>>;
 	quality: redux.AudioQuality;
+	/** Delivered by the Atmos sign-in (see atmos.ts), so a retry asks that profile again. */
+	atmos?: boolean;
+};
+
+const advertisesAtmos = (mediaItem: MediaItem) => {
+	const item = mediaItem.tidalItem as { audioModes?: string[]; mediaMetadata?: { tags?: string[] } };
+	return Boolean(item.audioModes?.includes("DOLBY_ATMOS") || item.mediaMetadata?.tags?.includes("DOLBY_ATMOS"));
 };
 
 const resolvePlaybackInfo = async (mediaItem: MediaItem): Promise<ResolvedPlayback> => {
@@ -126,6 +134,18 @@ const resolvePlaybackInfo = async (mediaItem: MediaItem): Promise<ResolvedPlayba
 			if (isRateLimited(error) || !retryableDownloadError(error)) throw error;
 		}
 	}
+	// The desktop profile gets no stream for an Atmos-only track; the Atmos sign-in does.
+	if (advertisesAtmos(mediaItem)) {
+		if (!hasAtmosLogin())
+			throw new Error(
+				atmosAvailable
+					? `Track ${mediaItem.id} is only on TIDAL in Dolby Atmos: sign in to Dolby Atmos in the plugin settings to download it`
+					: `Track ${mediaItem.id} is only on TIDAL in Dolby Atmos, which TIDAL does not serve to the desktop app`,
+			);
+		const playbackInfo = await getAtmosPlaybackInfo(mediaItem.id);
+		if (playbackInfo !== undefined) return { playbackInfo, quality: preferredQuality, atmos: true };
+		lastError = new Error(`Track ${mediaItem.id} is not available in Dolby Atmos either`);
+	}
 	throw lastError;
 };
 
@@ -148,6 +168,24 @@ const getActualDownloadFormat = ({ playbackInfo, quality }: ResolvedPlayback) =>
 		LOW: "Low",
 	};
 	return { isAtmos, downloadedAudio: isAtmos ? "Dolby Atmos" : qualityLabels[quality] };
+};
+
+/**
+ * An album gets CD folders when TIDAL counts more than one volume or any of its tracks sits on disc 2
+ * or later: an album object from the page can report one volume for a two-disc album.
+ */
+const multiDiscAlbums = new Map<string, Promise<boolean>>();
+const isMultiDiscAlbum = (album: Album) => {
+	let multiDisc = multiDiscAlbums.get(String(album.id));
+	if (multiDisc === undefined) {
+		multiDisc = (async () => {
+			if ((album.tidalAlbum.numberOfVolumes ?? 1) > 1) return true;
+			for await (const item of await album.mediaItems()) if ((item.tidalItem.volumeNumber ?? 1) > 1) return true;
+			return false;
+		})();
+		multiDiscAlbums.set(String(album.id), multiDisc);
+	}
+	return multiDisc;
 };
 
 type AlbumMarkers = { hiRes: boolean; realMax: boolean };
@@ -218,7 +256,9 @@ const downloadWithRetry = async (
 			// Do not use MediaItem.playbackInfo() here: it is memoized and can retain an expired signed URL.
 			const playbackInfo = attempt === 1
 				? initialPlayback.playbackInfo
-				: await getPlaybackInfo(mediaItem.id, initialPlayback.quality);
+				: initialPlayback.atmos
+					? await getAtmosPlaybackInfo(mediaItem.id)
+					: await getPlaybackInfo(mediaItem.id, initialPlayback.quality);
 			if (playbackInfo === undefined) throw new Error(`Track ${mediaItem.id} is not available`);
 			await safeDownload(playbackInfo, path, downloadTags, mediaItem.id);
 			return playbackInfo;
@@ -310,7 +350,7 @@ const queueFavoriteDownload = (
 			const variants = getPathVariants(resolvedPlayback, await getTrackAlbumMarkers(sourceMediaItem, sourceAlbum, isAlbumTrack && settings.useRealMAX));
 			const presentationTags: ArchiveTagValues = { ...archiveTags, variantSuffix: formatVariantSuffix(variants) };
 			// Disc layout follows the chosen TIDAL release, not the RealMAX substitute.
-			multiDiscAlbum ??= ((await sourceMediaItem.album())?.tidalAlbum.numberOfVolumes ?? 1) > 1;
+			multiDiscAlbum ??= await sourceMediaItem.album().then((album) => (album === undefined ? false : isMultiDiscAlbum(album)));
 			let fileName = await getFileName(
 				mediaItem,
 				resolvedPlayback.quality,
@@ -446,7 +486,7 @@ const queueAlbumDownload = (albumId: redux.ItemId, startupResume = false) => {
 				return;
 			}
 			const albumTagOverrides = await getAlbumTagOverrides(album);
-			const multiDiscAlbum = album.tidalAlbum.numberOfVolumes > 1;
+			const multiDiscAlbum = await isMultiDiscAlbum(album);
 			for await (const mediaItem of mediaItems) {
 				queueFavoriteDownload(mediaItem.id, true, albumTagOverrides, album, startupResume, multiDiscAlbum);
 			}
@@ -589,10 +629,22 @@ ContextMenu.onMediaItem(unloads, async ({ mediaCollection, contextMenu }) => {
 			const { tags: enrichedTags } = await firstMediaItem.flacTags();
 			const albumTagOverrides = await getAlbumTagOverrides(mediaCollection);
 			const tags = await getStablePathTags(firstMediaItem, enrichedTags, albumTagOverrides);
-			const multiDiscAlbum = mediaCollection.tidalAlbum.numberOfVolumes > 1;
-			const resolvedPlayback = await resolvePlaybackInfo(firstMediaItem);
-			const { downloadedAudio } = getActualDownloadFormat(resolvedPlayback);
-			const variants = getPathVariants(resolvedPlayback, await getAlbumMarkers(mediaCollection));
+			const multiDiscAlbum = await isMultiDiscAlbum(mediaCollection);
+			const albumMarkers = await getAlbumMarkers(mediaCollection);
+			// Credits need no stream: when TIDAL refuses one (e.g. "Asset is not ready for playback"),
+			// the folder markers come from what the track advertises instead.
+			let downloadedAudio: string | undefined;
+			let variants: ReturnType<typeof technicalVariants>;
+			try {
+				const resolvedPlayback = await resolvePlaybackInfo(firstMediaItem);
+				downloadedAudio = getActualDownloadFormat(resolvedPlayback).downloadedAudio;
+				variants = getPathVariants(resolvedPlayback, albumMarkers);
+			} catch (error) {
+				if (isRateLimited(error)) throw error;
+				const atmos = advertisesAtmos(firstMediaItem);
+				downloadedAudio = atmos ? "Dolby Atmos" : undefined;
+				variants = technicalVariants({ atmos, lossy: false, bitDepth: albumMarkers.hiRes ? 24 : 16, realMax: albumMarkers.realMax });
+			}
 			const presentationTags: ArchiveTagValues = { ...tags, variantSuffix: formatVariantSuffix(variants) };
 			let audioPath: string | string[];
 			const libraryBase = settings.defaultPath;
@@ -648,9 +700,7 @@ ContextMenu.onMediaItem(unloads, async ({ mediaCollection, contextMenu }) => {
 		// An album is judged as a whole; a playlist track by its own album, without RealMAX lookups on it.
 		const collectionMarkers = (item: MediaItem) =>
 			sourceAlbum !== undefined ? getAlbumMarkers(sourceAlbum) : getTrackAlbumMarkers(item, undefined, false);
-		const sourceIsMultiDisc = sourceAlbum?.tidalAlbum.numberOfVolumes !== undefined
-			? sourceAlbum.tidalAlbum.numberOfVolumes > 1
-			: undefined;
+		const sourceIsMultiDisc = sourceAlbum !== undefined ? await isMultiDiscAlbum(sourceAlbum) : undefined;
 		try {
 			if (sourceAlbum !== undefined) {
 				downloadButton.text = settings.useRealMAX ? `Checking RealMax...` : `Checking album quality...`;
@@ -675,7 +725,7 @@ ContextMenu.onMediaItem(unloads, async ({ mediaCollection, contextMenu }) => {
 				const { downloadedAudio } = getActualDownloadFormat(resolvedPlayback);
 				const variants = getPathVariants(resolvedPlayback, await collectionMarkers(sourceMediaItem));
 				const presentationTags: ArchiveTagValues = { ...archiveTags, variantSuffix: formatVariantSuffix(variants) };
-				const multiDiscAlbum = sourceIsMultiDisc ?? (((await mediaItem.album())?.tidalAlbum.numberOfVolumes ?? 1) > 1);
+				const multiDiscAlbum = sourceIsMultiDisc ?? (await mediaItem.album().then((album) => (album === undefined ? false : isMultiDiscAlbum(album))));
 
 				downloadButton.text = `Fetching filename...`;
 				let fileName = await getFileName(
@@ -692,7 +742,9 @@ ContextMenu.onMediaItem(unloads, async ({ mediaCollection, contextMenu }) => {
 				const path = downloadFolder !== undefined ? [downloadFolder, fileName] : await getDownloadPath(fileName);
 				if (path === undefined) return;
 
-				const alreadyExists = settings.skipExistingFiles && (await audioFileExists(path));
+				const indexedPath = getIndexedDownloadPath(sourceItemId) ?? getIndexedDownloadPath(mediaItem.id);
+				const alreadyExists =
+					settings.skipExistingFiles && ((await audioFileExists(path)) || (indexedPath !== undefined && (await audioFileExists(indexedPath))));
 				let downloadSucceeded = false;
 				if (alreadyExists) {
 					skippedCount++;

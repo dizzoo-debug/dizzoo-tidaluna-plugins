@@ -3,7 +3,9 @@ import { MediaItem, Quality, redux } from "@luna/lib";
 import { LunaButtonSetting, LunaSelectItem, LunaSelectSetting, LunaSettings, LunaSwitchSetting, LunaTextSetting, LunaTitle } from "@luna/ui";
 
 import React from "react";
+import { atmosAvailable, hasAtmosLogin, signInAtmos, signOutAtmos } from "./atmos";
 import { clearCompleteAlbums, completeAlbumCount, isAlbumComplete, keepOutsideTidal, reindexFromLibrary } from "./downloadIndex";
+import { openExternal } from "@luna/lib.native";
 import { getDownloadFolder } from "./helpers";
 import type { IdentifyResult } from "./identify";
 import { identifyLibraryFiles, replaceIdentifiedFiles } from "./identifyLibrary";
@@ -121,6 +123,8 @@ export const Settings = () => {
 	const [replaceStatus, setReplaceStatus] = React.useState<string>();
 	const [notFound, setNotFound] = React.useState<IdentifyResult["notFound"]>([]);
 	const [keepStatus, setKeepStatus] = React.useState<string>();
+	const [atmosLink, setAtmosLink] = React.useState<{ verificationUri: string; userCode: string }>();
+	const [atmosStatus, setAtmosStatus] = React.useState<string | undefined>(hasAtmosLogin() ? "Signed in to Dolby Atmos." : undefined);
 
 	const relativePath = (path: string) => path.slice(settings.defaultPath?.length ?? 0).replace(/^[\\/]/, "");
 	const runIdentify = async (broad: boolean) => {
@@ -184,6 +188,62 @@ export const Settings = () => {
 				checked={useRealMAX}
 				onChange={(_, checked) => setUseRealMAX((settings.useRealMAX = checked))}
 			/>
+			{atmosAvailable && (
+			<LunaButtonSetting
+				title="Dolby Atmos sign-in"
+				desc={
+					<>
+						TIDAL serves Dolby Atmos only to some of its apps, not to this desktop app. Sign in once with an Atmos-capable TIDAL profile, so tracks that exist only in Dolby Atmos are downloaded into "[Atmos]" album folders (m4a). You confirm the sign-in yourself on link.tidal.com; no password is entered here.
+						{atmosStatus && (
+							<>
+								<br />
+								{atmosLink ? (
+									<>
+										Open{" "}
+										<a
+											href={atmosLink.verificationUri}
+											style={{ color: "inherit", textDecoration: "underline", cursor: "pointer" }}
+											onClick={(e) => {
+												e.preventDefault();
+												void Promise.resolve(openExternal(atmosLink.verificationUri)).catch(() => undefined);
+											}}
+										>
+											{atmosLink.verificationUri}
+										</a>{" "}
+										and confirm the code <b>{atmosLink.userCode}</b>…
+									</>
+								) : (
+									atmosStatus
+								)}
+							</>
+						)}
+					</>
+				}
+				sx={{ whiteSpace: "nowrap", flexShrink: 0, minWidth: "max-content" }}
+				disabled={atmosStatus?.startsWith("Open ")}
+				onClick={async () => {
+					if (hasAtmosLogin()) {
+						await signOutAtmos();
+						setAtmosStatus("Signed out of Dolby Atmos.");
+						return;
+					}
+					try {
+						await signInAtmos((link) => {
+							setAtmosLink(link);
+							setAtmosStatus(`Open ${link.verificationUri} and confirm the code ${link.userCode}…`);
+							// The browser opens on its own; the link in the status line opens it again.
+							void Promise.resolve(openExternal(link.verificationUri)).catch(() => undefined);
+						});
+						setAtmosLink(undefined);
+						setAtmosStatus("Signed in: Atmos-only tracks are downloaded from now on.");
+					} catch (error) {
+						setAtmosLink(undefined);
+						setAtmosStatus(`Sign-in failed: ${String(error)}`);
+					}
+				}}
+				children={atmosStatus?.startsWith("Signed in") || (atmosStatus === undefined && hasAtmosLogin()) ? "Sign out" : "Sign in"}
+			/>
+			)}
 			<LunaSwitchSetting
 				title="Skip existing audio files"
 				desc="Do not download a track when a file with the same final path already exists."

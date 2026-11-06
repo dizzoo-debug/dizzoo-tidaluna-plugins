@@ -90,6 +90,17 @@ export const normalizeEdition = (title: string, version?: string | null, genre?:
 	return { archiveTitle, editions, soundtrack };
 };
 
+/**
+ * The top folder of an album: soundtracks in "!OST", Various Artists compilations in "!Collections/Various Artists",
+ * other albums TIDAL types as COMPILATION in "!Collections", everything else under the album artist.
+ */
+export const libraryRootFor = (album: { soundtrack: boolean; variousArtists: boolean; albumType?: string | null; albumArtist: string }) => {
+	if (album.soundtrack) return "!OST";
+	if (album.variousArtists) return "!Collections/Various Artists";
+	if (String(album.albumType ?? "").toUpperCase() === "COMPILATION") return "!Collections";
+	return album.albumArtist;
+};
+
 export const isVariousArtists = (artists: string[]) =>
 	artists.some((artist) => /^(?:various\s+artists|v\.\s*a\.)$/i.test(artist.trim()));
 

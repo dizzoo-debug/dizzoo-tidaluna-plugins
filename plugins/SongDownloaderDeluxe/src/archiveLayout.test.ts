@@ -8,6 +8,7 @@ import {
 	formatVariantSuffix,
 	isSoundtrackRelease,
 	isVariousArtists,
+	libraryRootFor,
 	normalizeEdition,
 	sanitizeLibraryComponent,
 } from "./archiveLayout";
@@ -54,6 +55,11 @@ assert.equal(addFolderVariants("A/A - X (2003) [Hi-Res]/01 - t.flac", ["Hi-Res",
 assert.equal(addFolderVariants("A/A - X (2003)/CD1/01 - t.flac", ["AAC"], true), "A/A - X (2003) [AAC]/CD1/01 - t.flac");
 
 assert.equal(formatVariantSuffix([]), "");
+const root = { soundtrack: false, variousArtists: false, albumType: "ALBUM", albumArtist: "Aretha Franklin" };
+assert.equal(libraryRootFor(root), "Aretha Franklin");
+assert.equal(libraryRootFor({ ...root, albumType: "COMPILATION" }), "!Collections");
+assert.equal(libraryRootFor({ ...root, albumType: "COMPILATION", variousArtists: true }), "!Collections/Various Artists");
+assert.equal(libraryRootFor({ ...root, variousArtists: true, soundtrack: true }), "!OST");
 assert.equal(formatVariantSuffix(["Atmos", "Atmos"]), " [Atmos]");
 assert.equal(addEditionVariant("", "Atmos"), " [Atmos]");
 assert.equal(addEditionVariant(" [Atmos]", "Atmos"), " [Atmos]");
