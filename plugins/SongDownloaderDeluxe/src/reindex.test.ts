@@ -65,6 +65,11 @@ try {
 	await writeFile(join(root, "Artist", "broken.flac"), "not a flac");
 
 	assert.equal(await readFlacTidalId(kept), "42");
+	// An ID3v2 tag in front of the FLAC stream (10-byte header, 5-byte body) is skipped.
+	const withId3 = join(root, "id3.flac");
+	await writeFile(withId3, Buffer.concat([Buffer.from([0x49, 0x44, 0x33, 3, 0, 0, 0, 0, 0, 5]), Buffer.alloc(5), flac(["COMMENT=http://www.tidal.com/track/77"])]));
+	assert.equal(await readFlacTidalId(withId3), "77");
+	await rm(withId3);
 	const result = await reindexLibrary(root);
 	assert.equal(result.entries["42"], kept);
 	assert.equal(result.scanned, 5);

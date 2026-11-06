@@ -44,11 +44,16 @@ export type FlacInfo = { tidalId?: string; tags: Record<string, string>; duratio
 export const readFlacInfo = async (path: string): Promise<FlacInfo | undefined> => {
 	const file = await open(path, "r");
 	try {
+		// Some taggers put an ID3v2 tag in front of the FLAC stream; skip it (size is syncsafe, bytes 6-9).
+		const id3 = Buffer.alloc(10);
+		await file.read(id3, 0, 10, 0);
+		const start =
+			id3.toString("latin1", 0, 3) === "ID3" ? 10 + ((id3[6] & 0x7f) << 21) + ((id3[7] & 0x7f) << 14) + ((id3[8] & 0x7f) << 7) + (id3[9] & 0x7f) + (id3[5] & 0x10 ? 10 : 0) : 0;
 		const header = Buffer.alloc(4);
-		await file.read(header, 0, 4, 0);
+		await file.read(header, 0, 4, start);
 		if (header.toString("latin1") !== "fLaC") return undefined;
 		const info: FlacInfo = { tags: {} };
-		let position = 4;
+		let position = start + 4;
 		for (;;) {
 			const { bytesRead } = await file.read(header, 0, 4, position);
 			if (bytesRead < 4) return info;
