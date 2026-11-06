@@ -119,6 +119,7 @@ export const Settings = () => {
 	const [identifyStatus, setIdentifyStatus] = React.useState<string>();
 	const [identifyList, setIdentifyList] = React.useState<{ path: string; reason?: string }[]>([]);
 	const [identifyRan, setIdentifyRan] = React.useState(false);
+	const [alreadyKept, setAlreadyKept] = React.useState(0);
 	const [identified, setIdentified] = React.useState<IdentifyResult["found"]>([]);
 	const [replaceStatus, setReplaceStatus] = React.useState<string>();
 	const [notFound, setNotFound] = React.useState<IdentifyResult["notFound"]>([]);
@@ -165,6 +166,7 @@ export const Settings = () => {
 			setNotFound(result.notFound.filter((f) => !f.reason?.startsWith("not searched")));
 			setKeepStatus(undefined);
 			setReplaceStatus(undefined);
+			setAlreadyKept(result.keptOutsideTidal.length);
 			setIdentifyRan(!result.stoppedByRateLimit);
 		} catch (error) {
 			setIdentifyStatus(`Lookup failed: ${String(error)}`);
@@ -394,11 +396,12 @@ export const Settings = () => {
 					children="Replace"
 				/>
 			)}
-			{identified.length + notFound.length > 0 && (
+			{identifyRan && identified.length + notFound.length + alreadyKept > 0 && (
 				<LunaButtonSetting
 					title="Keep files as archive files"
 					desc={
 						<>
+							{identified.length + notFound.length === 0 && `All ${alreadyKept} archive file(s) found are already kept; nothing new to keep. `}
 							Keeps the {identified.length + notFound.length} listed file(s){identified.length > 0 && notFound.length > 0 && ` (${identified.length} identified, ${notFound.length} not identified)`} in the library as they are, instead of replacing them: Identify no longer looks them up, only Search wider does. Recognised by their audio, so renaming or moving them keeps the mark.
 							{keepStatus && (
 								<>
@@ -409,6 +412,7 @@ export const Settings = () => {
 						</>
 					}
 					sx={{ whiteSpace: "nowrap", flexShrink: 0, minWidth: "max-content" }}
+					disabled={identified.length + notFound.length === 0}
 					onClick={async () => {
 						const files = [...identified, ...notFound];
 						await keepOutsideTidal(files);
