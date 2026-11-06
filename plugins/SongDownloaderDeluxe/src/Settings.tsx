@@ -1,9 +1,9 @@
 import { ReactiveStore } from "@luna/core";
-import { MediaItem, Quality, type redux } from "@luna/lib";
+import { MediaItem, Quality, redux } from "@luna/lib";
 import { LunaButtonSetting, LunaSelectItem, LunaSelectSetting, LunaSettings, LunaSwitchSetting, LunaTextSetting, LunaTitle } from "@luna/ui";
 
 import React from "react";
-import { clearCompleteAlbums, completeAlbumCount, keepOutsideTidal, reindexFromLibrary } from "./downloadIndex";
+import { clearCompleteAlbums, completeAlbumCount, isAlbumComplete, keepOutsideTidal, reindexFromLibrary } from "./downloadIndex";
 import { getDownloadFolder } from "./helpers";
 import type { IdentifyResult } from "./identify";
 import { identifyLibraryFiles, replaceIdentifiedFiles } from "./identifyLibrary";
@@ -106,7 +106,13 @@ export const Settings = () => {
 	const [autoDownloadFavorites, setAutoDownloadFavorites] = React.useState(settings.autoDownloadFavorites);
 	const [autoDownloadAlbums, setAutoDownloadAlbums] = React.useState(settings.autoDownloadAlbums);
 	const [resumeCollectionAlbums, setResumeCollectionAlbums] = React.useState(settings.resumeCollectionAlbums);
-	const [completeAlbums, setCompleteAlbums] = React.useState(completeAlbumCount());
+	// Collection albums found complete on disk, and those the startup scan still checks with TIDAL.
+	const collectionState = () => {
+		const albums = redux.store.getState().favorites.albums;
+		const complete = albums.filter((albumId) => isAlbumComplete(albumId)).length;
+		return { all: albums.length, complete, other: completeAlbumCount() - complete };
+	};
+	const [completeAlbums, setCompleteAlbums] = React.useState(collectionState());
 	const [reindexStatus, setReindexStatus] = React.useState<string>();
 	const [identifyStatus, setIdentifyStatus] = React.useState<string>();
 	const [identifyList, setIdentifyList] = React.useState<{ path: string; reason?: string }[]>([]);
@@ -216,10 +222,10 @@ export const Settings = () => {
 			/>
 			<LunaButtonSetting
 				title="Re-check complete albums"
-				desc={`${completeAlbums} album(s) were found complete on disk and are skipped by the startup scan without contacting TIDAL. Reset this after deleting or moving music files.`}
+				desc={`${completeAlbums.complete} of ${completeAlbums.all} Collection album(s) were found complete on disk and are skipped by the startup scan without contacting TIDAL; ${completeAlbums.all - completeAlbums.complete} not complete, so the scan checks them again${completeAlbums.other > 0 ? ` (and ${completeAlbums.other} complete album(s) no longer in the Collection)` : ""}. Reset this after deleting or moving music files.`}
 				onClick={async () => {
 					await clearCompleteAlbums();
-					setCompleteAlbums(completeAlbumCount());
+					setCompleteAlbums(collectionState());
 				}}
 				children="Reset"
 			/>

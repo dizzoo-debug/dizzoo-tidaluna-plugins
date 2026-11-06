@@ -24,6 +24,20 @@ const titleVariants = (title: string, version?: string | null) => {
 	return new Set([plain, normalize(`${title} ${version ?? ""}`), normalize(title.replace(/\s*[([][^)\]]*[)\]]\s*/g, " "))]);
 };
 
+/**
+ * Old taggers wrote "Artist - Title" into both the artist and the title field; split it so the search
+ * gets the plain title and artist.
+ */
+export const cleanTags = (file: UnidentifiedFile): UnidentifiedFile => {
+	const title = file.title?.trim();
+	const artist = file.artist?.trim();
+	if (!title) return file;
+	const split = title.match(/^(.+?) - (.+)$/);
+	if (split && (!artist || artist === title)) return { ...file, artist: split[1], title: split[2] };
+	if (artist && title.toLowerCase().startsWith(`${artist.toLowerCase()} - `)) return { ...file, title: title.slice(artist.length + 3) };
+	return file;
+};
+
 export type MatchCheck = { match?: TrackCandidate; fromOtherAlbum?: boolean; reason?: string };
 
 /**
@@ -44,11 +58,15 @@ export const checkTidalMatch = (file: UnidentifiedFile, candidates: TrackCandida
 		const candidateTitles = titleVariants(candidate.title, candidate.version);
 		if (![...fileTitles].some((t) => t && candidateTitles.has(t))) continue;
 		const names = [...(candidate.artists ?? []), ...(candidate.artist ? [candidate.artist] : [])].map((a) => normalize(a.name));
-		if (fileArtist && !names.some((name) => name && (fileArtist.includes(name) || name.includes(fileArtist)))) continue;
 		const durationGap =
 			file.durationSeconds !== undefined && candidate.duration !== undefined ? Math.abs(file.durationSeconds - candidate.duration) : undefined;
 		const album = normalize(candidate.album?.title);
 		const albumMatches = !fileAlbum || !album || album === fileAlbum || album.startsWith(fileAlbum) || fileAlbum.startsWith(album);
+		if (fileArtist && !names.some((name) => name && (fileArtist.includes(name) || name.includes(fileArtist)))) {
+			// A wide check forgives a misspelt artist, only on the same album and within 2 s.
+			if (broad && fileAlbum && album && albumMatches && durationGap !== undefined && durationGap <= 2) accepted.push({ candidate, score: 5, fromOtherAlbum: false });
+			continue;
+		}
 		if (durationGap !== undefined && durationGap > 3) {
 			rejected.push(`length differs by ${Math.round(durationGap)} s (${candidate.album?.title ?? "?"})`);
 			continue;
@@ -77,7 +95,7 @@ export type IdentifyResult = {
 	stoppedByRateLimit: boolean;
 };
 
-export type IdentifyPhase = "by title" | "with album";
+export type IdentifyPhase = "by title" | "with album" | "title and album only";
 
 const sleep = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -92,9 +110,10 @@ export const identifyOnTidal = async (
 	options: { broad?: boolean } = {},
 ): Promise<IdentifyResult> => {
 	const result: IdentifyResult = { found: [], notFound: [], stoppedByRateLimit: false };
-	for (const [index, file] of files.entries()) {
+	for (const [index, original] of files.entries()) {
+		const file = cleanTags(original);
 		if (result.stoppedByRateLimit) {
-			result.notFound.push({ ...file, reason: "not searched: TIDAL answered 429" });
+			result.notFound.push({ ...original, reason: "not searched: TIDAL answered 429" });
 			continue;
 		}
 		try {
@@ -112,6 +131,13 @@ export const identifyOnTidal = async (
 				onProgress?.(index, files.length, "with album");
 				const second = checkTidalMatch(file, await search([artist, file.title, file.album.replace(/[:/]/g, " ")].filter(Boolean).join(" ")), options.broad);
 				check = second.match ? second : { reason: [check.reason, second.reason].filter(Boolean).join("; ") };
+			}
+			// The wide search also leaves the artist out, for tags that misspell it.
+			if (!check.match && options.broad && file.album) {
+				await sleep(600);
+				onProgress?.(index, files.length, "title and album only");
+				const third = checkTidalMatch(file, await search([file.title, file.album.replace(/[:/]/g, " ")].filter(Boolean).join(" ")), true);
+				check = third.match ? third : { reason: [check.reason, third.reason].filter(Boolean).join("; ") };
 			}
 			if (check.match)
 				result.found.push({ path: file.path, audioMd5: file.audioMd5, id: String(check.match.id), title: check.match.title, album: check.match.album?.title, fromOtherAlbum: check.fromOtherAlbum });

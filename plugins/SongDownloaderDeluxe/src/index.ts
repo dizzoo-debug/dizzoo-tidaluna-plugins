@@ -112,7 +112,11 @@ const resolvePlaybackInfo = async (mediaItem: MediaItem): Promise<ResolvedPlayba
 	for (const quality of qualityCandidates) {
 		try {
 			const playbackInfo = await getPlaybackInfo(mediaItem.id, quality);
-			if (playbackInfo === undefined) throw new Error(`Track ${mediaItem.id} is not available at ${quality}`);
+			if (playbackInfo === undefined) {
+				// Not served at this quality: try the next one (HiRes falls back to Lossless).
+				lastError = new Error(`Track ${mediaItem.id} is not available at ${quality}`);
+				continue;
+			}
 			if (quality !== preferredQuality) {
 				trace.warn(`TIDAL rejected ${preferredQuality} for track ${mediaItem.id}; using ${quality} instead.`);
 			}

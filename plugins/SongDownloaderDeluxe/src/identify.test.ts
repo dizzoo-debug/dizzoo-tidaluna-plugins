@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 
-import { checkTidalMatch, identifyOnTidal, pickTidalMatch, type TrackCandidate } from "./identify";
+import { checkTidalMatch, cleanTags, identifyOnTidal, pickTidalMatch, type TrackCandidate } from "./identify";
 
 const wings: TrackCandidate[] = [
 	{ id: 1, title: "Wings", duration: 252, artists: [{ name: "Birdy" }], album: { title: "Fire Within (Deluxe)" } },
@@ -51,5 +51,19 @@ assert.equal(checkTidalMatch({ ...file, album: "Some Compilation", durationSecon
 	});
 	assert.deepEqual(queries, ["Birdy Wings", "Birdy Wings Wings"]);
 	assert.equal(second.found[0]?.id, "7");
+
+	// "Artist - Title" in both tags is split; the wide search drops a misspelt artist and matches on album and length.
+	const baraka = { path: "b", title: "Michael Streans - Village Dance", artist: "Michael Streans - Village Dance", album: "Baraka", durationSeconds: 179 };
+	assert.deepEqual(cleanTags(baraka), { ...baraka, artist: "Michael Streans", title: "Village Dance" });
+	const village = { id: 11, title: "Village Dance", duration: 180, artists: [{ name: "Michael Stearns" }], album: { title: "Baraka (Original Motion Picture Soundtrack)" } };
+	const wideQueries: string[] = [];
+	const search = async (query: string) => (wideQueries.push(query), wideQueries.length === 3 ? [village] : []);
+	assert.equal((await identifyOnTidal([baraka], search)).found.length, 0);
+	wideQueries.length = 0;
+	const wide = await identifyOnTidal([baraka], search, undefined, { broad: true });
+	assert.deepEqual(wideQueries, ["Michael Streans Village Dance", "Michael Streans Village Dance Baraka", "Village Dance Baraka"]);
+	assert.equal(wide.found[0]?.id, "11");
+	// Not on the same album, a different artist still never matches.
+	assert.equal(checkTidalMatch({ ...cleanTags(baraka), album: "Other" }, [village], true).match, undefined);
 	console.log("identify tests passed");
 })();
