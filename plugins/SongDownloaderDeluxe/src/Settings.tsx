@@ -4,7 +4,7 @@ import { LunaButtonSetting, LunaSelectItem, LunaSelectSetting, LunaSettings, Lun
 
 import React from "react";
 import { atmosAvailable, hasAtmosLogin, signInAtmos, signOutAtmos } from "./atmos";
-import { clearCompleteAlbums, completeAlbumCount, isAlbumComplete, keepOutsideTidal, reindexFromLibrary } from "./downloadIndex";
+import { clearCompleteAlbums, completeAlbumCount, isAlbumComplete, keepOutsideTidal, reindexFromLibrary, unavailableTrackCount } from "./downloadIndex";
 import { openExternal } from "@luna/lib.native";
 import { getDownloadFolder } from "./helpers";
 import type { IdentifyResult } from "./identify";
@@ -24,6 +24,8 @@ type Settings = {
 	autoDownloadFavorites: boolean;
 	autoDownloadAlbums: boolean;
 	resumeCollectionAlbums: boolean;
+	retryUnavailableTracks: boolean;
+	compilationList: string;
 	libraryLayoutVersion: number;
 };
 
@@ -41,6 +43,8 @@ const defaultSettings: Settings = {
 	autoDownloadFavorites: true,
 	autoDownloadAlbums: true,
 	resumeCollectionAlbums: true,
+	retryUnavailableTracks: true,
+	compilationList: "",
 	libraryLayoutVersion: 2,
 };
 
@@ -108,6 +112,7 @@ export const Settings = () => {
 	const [autoDownloadFavorites, setAutoDownloadFavorites] = React.useState(settings.autoDownloadFavorites);
 	const [autoDownloadAlbums, setAutoDownloadAlbums] = React.useState(settings.autoDownloadAlbums);
 	const [resumeCollectionAlbums, setResumeCollectionAlbums] = React.useState(settings.resumeCollectionAlbums);
+	const [retryUnavailableTracks, setRetryUnavailableTracks] = React.useState(settings.retryUnavailableTracks);
 	// Collection albums found complete on disk, and those the startup scan still checks with TIDAL.
 	const collectionState = () => {
 		const albums = redux.store.getState().favorites.albums;
@@ -120,6 +125,7 @@ export const Settings = () => {
 	const [identifyList, setIdentifyList] = React.useState<{ path: string; reason?: string }[]>([]);
 	const [identifyRan, setIdentifyRan] = React.useState(false);
 	const [alreadyKept, setAlreadyKept] = React.useState(0);
+	const [compilationList, setCompilationList] = React.useState(settings.compilationList);
 	const [identified, setIdentified] = React.useState<IdentifyResult["found"]>([]);
 	const [replaceStatus, setReplaceStatus] = React.useState<string>();
 	const [notFound, setNotFound] = React.useState<IdentifyResult["notFound"]>([]);
@@ -282,6 +288,12 @@ export const Settings = () => {
 				checked={resumeCollectionAlbums}
 				onChange={(_, checked) => setResumeCollectionAlbums((settings.resumeCollectionAlbums = checked))}
 			/>
+			<LunaSwitchSetting
+				title="Look again for tracks TIDAL could not find"
+				desc={`On: the startup scan asks TIDAL again for favorite tracks it could not load before. Off: those tracks are skipped without contacting TIDAL. ${unavailableTrackCount()} track(s) are marked as not found; a track is unmarked as soon as TIDAL loads it again.`}
+				checked={retryUnavailableTracks}
+				onChange={(_, checked) => setRetryUnavailableTracks((settings.retryUnavailableTracks = checked))}
+			/>
 			<LunaButtonSetting
 				title="Re-check complete albums"
 				desc={`${completeAlbums.complete} of ${completeAlbums.all} Collection album(s) were found complete on disk and are skipped by the startup scan without contacting TIDAL; ${completeAlbums.all - completeAlbums.complete} not complete, so the scan checks them again${completeAlbums.other > 0 ? ` (and ${completeAlbums.other} complete album(s) no longer in the Collection)` : ""}. Reset this after deleting or moving music files.`}
@@ -425,6 +437,16 @@ export const Settings = () => {
 					children="Keep"
 				/>
 			)}
+			<FormatSetting
+				title="Always put in !Compilations"
+				desc={
+					<>
+						One entry per line: an artist, album or label (the ℗/© line). Matching albums go to !Compilations as "Artist - Album (year)" instead of the artist's folder. Without a match, an artist's own official collections stay with the artist; tribute, karaoke and re-recorded releases, albums of mostly other artists' tracks and compilations on another label than the artist's albums go to !Compilations.
+					</>
+				}
+				value={compilationList}
+				onChange={(e) => setCompilationList((settings.compilationList = e.target.value))}
+			/>
 			<LunaTextSetting
 				title="Cover filename format"
 				desc={

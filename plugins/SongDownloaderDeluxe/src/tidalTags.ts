@@ -9,6 +9,8 @@ export type TidalTagSource = {
 	trackNumber?: number;
 	volumeNumber?: number;
 	artists?: string[];
+	/** Artists TIDAL marks as FEATURED; written into the title as "(feat. X)" when TIDAL left them out. */
+	featuredArtists?: string[];
 	isrc?: string | null;
 	/**
 	 * ISRCs of the MusicBrainz recording behind the enriched tags (`brainzItem().recording.isrcs`);
@@ -32,7 +34,27 @@ export const formatTidalTitle = (title: string, version?: string | null) => {
 	return title;
 };
 
-const comparableTitle = (title: string, baseOnly = false) => {
+const featuringPattern = /(?:^|[\s([])(?:feat\.?|ft\.|featuring)\s/i;
+
+/** "B", "B & C", "B, C & D" */
+const joinArtistNames = (names: string[]) => (names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} & ${names[names.length - 1]}`);
+
+/**
+ * "Song (feat. B & C) (Radio Edit)": TIDAL often lists featured artists without naming them in the title.
+ * The credit goes before the trailing version groups, as TIDAL writes it when it does. A title that
+ * already credits a featuring, or already names the artist, is left alone.
+ */
+export const addFeaturedArtists = (title: string, featuredArtists: readonly string[] = []) => {
+	if (featuringPattern.test(title)) return title;
+	const lowerTitle = title.toLowerCase();
+	const names = [...new Set(featuredArtists.map((name) => name.trim()).filter((name) => name && !lowerTitle.includes(name.toLowerCase())))];
+	if (names.length === 0) return title;
+	const credit = ` (feat. ${joinArtistNames(names)})`;
+	const versions = title.match(/(?:\s[([][^()[\]]*[)\]])+$/)?.[0] ?? "";
+	return `${title.slice(0, title.length - versions.length)}${credit}${versions}`;
+};
+
+const comparableTitle =(title: string, baseOnly = false) => {
 	let value = title.normalize("NFKD").toLowerCase().replace(/\s&\s/g, " and ");
 	// "Song (Remastered 2009)", "Song [Live]", "Song - 2011 Remaster", "Song (feat. X)"
 	if (baseOnly) value = value.replace(/\([^)]*\)|\[[^\]]*\]|\s[-–—]\s.*$|\s(?:feat\.|ft\.|featuring\s).*$/g, "");
@@ -106,7 +128,8 @@ export const selectTidalTags = (enrichedTags: TagValues, item: TidalTagSource): 
 				delete tags.date;
 			}
 		}
-		tags.title = title;
+		// After the MusicBrainz check, which compares TIDAL's own title.
+		tags.title = addFeaturedArtists(title, item.featuredArtists);
 	}
 	if (item.trackNumber !== undefined) tags.trackNumber = String(item.trackNumber);
 	if (item.volumeNumber !== undefined) tags.discNumber = String(item.volumeNumber);
@@ -118,7 +141,10 @@ export const selectTidalTags = (enrichedTags: TagValues, item: TidalTagSource): 
 		tags.date = releaseDate.slice(0, 10);
 		tags.year = album?.releaseYear ?? releaseDate.slice(0, 4);
 	}
+	// Never MusicBrainz's: its ISRC and barcode can belong to another song or release (Live 8 ISRCs three tracks off).
 	if (item.isrc) tags.isrc = item.isrc;
+	else delete tags.isrc;
 	if (album?.upc) tags.upc = album.upc;
+	else delete tags.upc;
 	return tags;
 };

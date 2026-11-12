@@ -1,5 +1,5 @@
-import { access, appendFile, constants, mkdir, rename, stat, writeFile } from "fs/promises";
-import { dirname, join, relative } from "path";
+import { access, appendFile, constants, mkdir, readdir, rename, stat, writeFile } from "fs/promises";
+import { basename, dirname, join, relative } from "path";
 
 const resolvePath = (filePath: string | string[]) => (Array.isArray(filePath) ? join(...filePath) : filePath);
 
@@ -35,6 +35,17 @@ export const saveCoverArt = async (audioPath: string | string[], coverFileName: 
 		if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
 		throw error;
 	}
+};
+
+/**
+ * Whether the audio file's folder already has cover art (any .jpg) and album credits (any "credits.txt"),
+ * and the album name those files are named after: the folder, or the one above a CD1/CD2 folder. Disk only.
+ */
+export const albumExtrasPresent = async (audioPath: string | string[]) => {
+	const folder = dirname(resolvePath(audioPath));
+	const names = await readdir(folder).catch(() => [] as string[]);
+	const albumName = /^CD\d+$/i.test(basename(folder)) ? basename(dirname(folder)) : basename(folder);
+	return { cover: names.some((name) => /\.jpe?g$/i.test(name)), credits: names.some((name) => /credits\.txt$/i.test(name)), albumName };
 };
 
 export const saveTextFileNextToAudio = async (
@@ -88,4 +99,11 @@ export const appendDownloadLog = async (rootPath: string, fileName: string, head
 	}
 	await appendFile(logPath, `${line}\r\n`, "utf8");
 	return logPath;
+};
+
+/** Writes a report file (JSON or text) at the library root, replacing an older one. */
+export const writeLibraryReport = async (rootPath: string, fileName: string, text: string) => {
+	const reportPath = join(rootPath, fileName);
+	await writeFile(reportPath, text, "utf8");
+	return reportPath;
 };

@@ -2,11 +2,20 @@ import { Tracer, type LunaUnload } from "@luna/core";
 import { Album, ContextMenu, getPlaybackInfo, MediaItem, redux, safeInterval, safeTimeout, StyleTag } from "@luna/lib";
 
 import { makeAlbumCreditsText, makeAlbumCreditsTextForAlbum } from "./credits";
-import { getIndexedDownloadPath, isAlbumComplete, markAlbumComplete, rememberDownloadedTrack, reindexFromLibrary } from "./downloadIndex";
+import {
+	getIndexedDownloadPath,
+	isAlbumComplete,
+	isTrackUnavailable,
+	markAlbumComplete,
+	markTrackAvailable,
+	markTrackUnavailable,
+	rememberDownloadedTrack,
+	reindexFromLibrary,
+} from "./downloadIndex";
 import { logDownload, type DownloadLogEntry } from "./downloadLog";
 import { atmosAvailable, getAtmosPlaybackInfo, hasAtmosLogin } from "./atmos";
 import { safeDownload, safeDownloadProgress } from "./download.native";
-import { audioFileExists, fileExists, replaceWithQuarantine, saveCoverArt, saveTextFileNextToAudio } from "./files.native";
+import { albumExtrasPresent, audioFileExists, fileExists, replaceWithQuarantine, saveCoverArt, saveTextFileNextToAudio } from "./files.native";
 import { setTidalReplacer } from "./identifyLibrary";
 import {
 	applyTagFormat,
@@ -29,6 +38,18 @@ import styles from "file://downloadButton.css?minify";
 export const { errSignal, trace } = Tracer("[SongDownloader]");
 export const unloads = new Set<LunaUnload>();
 
+// Luna can leave the previous copy of the plugin running after an update without a full TIDAL restart
+// (seen 2026-11-11: every download twice, same second). The newest copy takes over; older copies stop
+// starting work, so nothing is requested from TIDAL twice.
+const instanceKey = "__songDownloaderDeluxeInstance";
+const instance = Symbol("SongDownloaderDeluxe");
+const globals = globalThis as unknown as Record<string, symbol | undefined>;
+globals[instanceKey] = instance;
+const superseded = () => globals[instanceKey] !== instance;
+unloads.add(() => {
+	if (globals[instanceKey] === instance) delete globals[instanceKey];
+});
+
 new StyleTag("SongDownloader", unloads, styles);
 
 const downloadButton = ContextMenu.addButton(unloads);
@@ -43,6 +64,70 @@ let autoDownloadQueue = Promise.resolve();
 let autoAlbumQueue = Promise.resolve();
 
 const deferredRetryDelays = [15 * 60_000, 30 * 60_000, 60 * 60_000];
+
+// Once per start whenever an auto-download is on, so files renamed or moved on disk are found through
+// the index instead of downloaded again. Works on disk only: no TIDAL requests.
+let startupReindex: Promise<void> | undefined;
+const reindexOnStartup = () =>
+	(startupReindex ??= (async () => {
+		const root = settings.defaultPath;
+		if (root === undefined || !(settings.autoDownloadFavorites || settings.autoDownloadAlbums)) return;
+		try {
+			const result = await reindexFromLibrary(root);
+			trace.log(`Library re-indexed on startup: ${Object.keys(result.entries).length} track(s) from ${result.scanned} file(s).`);
+			for (const [trackId, path] of Object.entries(result.entries)) queueAlbumExtras(trackId, path);
+		} catch (error) {
+			trace.warn(`Library re-index failed, using the existing index: ${String(error)}`);
+		}
+	})());
+
+/**
+ * Cover art and credits for album folders that have audio but lack them. They used to be written only
+ * while a track was being downloaded, so albums the index already knew (complete albums, renamed or
+ * moved folders, Identify → Replace) never got them. The folder is checked on disk first; TIDAL is
+ * asked only for a missing file, one folder at a time and paced, and a 429 stops it until next start.
+ * Files are named after the album folder, as the default cover and credits formats name them, and an
+ * existing file is never overwritten.
+ */
+const extrasFolders = new Set<string>();
+let extrasQueue = Promise.resolve();
+let extrasStopped = false;
+const extrasPace = 2000;
+const folderOf = (path: string | string[]) => {
+	const full = Array.isArray(path) ? path.join("\\") : path;
+	return full.slice(0, Math.max(full.lastIndexOf("/"), full.lastIndexOf("\\"))).toLowerCase();
+};
+const queueAlbumExtras = (trackId: redux.ItemId, audioPath: string | string[]) => {
+	if (!settings.saveCoverArt && !settings.saveAlbumCredits) return;
+	const folder = folderOf(audioPath);
+	if (extrasFolders.has(folder)) return;
+	extrasFolders.add(folder);
+	extrasQueue = extrasQueue.then(async () => {
+		if (extrasStopped || superseded()) return;
+		const present = await albumExtrasPresent(audioPath);
+		const needCover = settings.saveCoverArt && !present.cover;
+		const needCredits = settings.saveAlbumCredits && !present.credits;
+		if (!needCover && !needCredits) return;
+		await wait(extrasPace);
+		await waitForRateLimit();
+		try {
+			const mediaItem = await MediaItem.fromId(trackId, "track");
+			if (mediaItem === undefined) return;
+			const coverUrl = needCover ? await mediaItem.coverUrl() : undefined;
+			if (coverUrl !== undefined) await saveCoverArt(audioPath, `${present.albumName}.jpg`, coverUrl);
+			if (needCredits) {
+				const credits = await makeAlbumCreditsText(mediaItem);
+				if (credits !== undefined) await saveTextFileNextToAudio(audioPath, `${present.albumName} - credits.txt`, credits);
+			}
+			trace.log(`Filled in missing ${[coverUrl !== undefined && "cover art", needCredits && "credits"].filter(Boolean).join(" and ")} for ${present.albumName}`);
+		} catch (error) {
+			if (isRateLimited(error)) {
+				extrasStopped = true;
+				trace.warn("TIDAL answered 429 while filling in cover art and credits; the rest waits for the next start.");
+			} else trace.warn(`Could not fill in cover art or credits for ${present.albumName}: ${String(error)}`);
+		}
+	});
+};
 
 /** Bookkeeping after the audio is on disk: a failure is a warning, never a failed download. */
 const afterAudioSaved = async (what: string, step: () => Promise<unknown>) => {
@@ -109,6 +194,17 @@ const advertisesAtmos = (mediaItem: MediaItem) => {
 	return Boolean(item.audioModes?.includes("DOLBY_ATMOS") || item.mediaMetadata?.tags?.includes("DOLBY_ATMOS"));
 };
 
+const retryPassingErrors = async <T,>(run: () => Promise<T>, attempts = 3): Promise<T> => {
+	for (let attempt = 1; ; attempt++) {
+		try {
+			return await run();
+		} catch (error) {
+			if (attempt >= attempts || isRateLimited(error) || !retryableDownloadError(error)) throw error;
+			await wait(attempt * 2000);
+		}
+	}
+};
+
 const resolvePlaybackInfo = async (mediaItem: MediaItem): Promise<ResolvedPlayback> => {
 	const preferredQuality = settings.downloadQuality;
 	const qualityCandidates: redux.AudioQuality[] = [preferredQuality];
@@ -119,7 +215,9 @@ const resolvePlaybackInfo = async (mediaItem: MediaItem): Promise<ResolvedPlayba
 	let lastError: unknown;
 	for (const quality of qualityCandidates) {
 		try {
-			const playbackInfo = await getPlaybackInfo(mediaItem.id, quality);
+			// A passing TIDAL error (500, 403, a dropped connection) is asked again at the same quality:
+			// falling back on it turned single tracks of Hi-Res albums into 16-bit files.
+			const playbackInfo = await retryPassingErrors(() => getPlaybackInfo(mediaItem.id, quality));
 			if (playbackInfo === undefined) {
 				// Not served at this quality: try the next one (HiRes falls back to Lossless).
 				lastError = new Error(`Track ${mediaItem.id} is not available at ${quality}`);
@@ -130,8 +228,9 @@ const resolvePlaybackInfo = async (mediaItem: MediaItem): Promise<ResolvedPlayba
 			}
 			return { playbackInfo, quality };
 		} catch (error) {
-			lastError = error;
-			if (isRateLimited(error) || !retryableDownloadError(error)) throw error;
+			// Only "not served at this quality" moves to the next quality; any error stops here, so the
+			// track is retried later at the quality asked for instead of being saved lower.
+			throw error;
 		}
 	}
 	// The desktop profile gets no stream for an Atmos-only track; the Atmos sign-in does.
@@ -309,6 +408,10 @@ const queueFavoriteDownload = (
 		requested: settings.downloadQuality,
 	};
 
+	// "Artist - Title (Album)" once TIDAL has answered, the id until then.
+	const describeTrack = () =>
+		logEntry.title ? `${logEntry.artist ? `${logEntry.artist} - ` : ""}${logEntry.title}${logEntry.album ? ` (${logEntry.album})` : ""}` : `track ${itemId}`;
+
 	let requeue = false;
 	// Set once the audio file is on disk. Anything failing after that (download index, cover, credits,
 	// Luna's IndexedDB cache closing) is bookkeeping and must not be reported as a failed download.
@@ -318,10 +421,18 @@ const queueFavoriteDownload = (
 		.then(async () => {
 			// Already downloaded: decided from the local index and disk alone, with no TIDAL request.
 			// Before this, every startup scan fetched track, tags and playback info for each existing file.
-			if (startupResume) {
-				const indexedPath = getIndexedDownloadPath(itemId);
-				if (indexedPath !== undefined && (await audioFileExists(indexedPath))) return;
+			// New favorites use it too, so a track already on disk under another name is not downloaded twice.
+			await reindexOnStartup();
+			const indexedPath = getIndexedDownloadPath(itemId);
+			if (indexedPath !== undefined && (await audioFileExists(indexedPath))) {
+				if (!startupResume) trace.log(`Auto-download skipped, already on disk: ${Array.isArray(indexedPath) ? indexedPath.join("\\") : indexedPath}`);
+				queueAlbumExtras(itemId, indexedPath);
+				return;
 			}
+			if (superseded()) return;
+			if (startupResume && !settings.retryUnavailableTracks && isTrackUnavailable(itemId)) return;
+			// The startup scan may reach many missing tracks: pace them like albums.
+			if (startupResume) await wait(albumScanPaceMs);
 			await waitForRateLimit();
 			const isAlbumTrack = albumTrackIds.has(itemKey);
 			if (isAlbumTrack ? !settings.autoDownloadAlbums : !settings.autoDownloadFavorites) return;
@@ -333,7 +444,15 @@ const queueFavoriteDownload = (
 			}
 
 			const sourceMediaItem = await MediaItem.fromId(itemId, "track");
-			if (sourceMediaItem === undefined) throw new Error(`Unable to load newly favorited track ${itemId}`);
+			if (sourceMediaItem === undefined) {
+				await markTrackUnavailable(itemId);
+				throw new Error(`TIDAL could not load this track (removed from TIDAL or not available here)`);
+			}
+			await markTrackAvailable(itemId);
+			// Known before any tag work, so even a failure further down is reported by name.
+			logEntry.artist = sourceMediaItem.tidalItem.artists?.[0]?.name;
+			logEntry.title = formatTidalTitle(sourceMediaItem.tidalItem.title, sourceMediaItem.tidalItem.version);
+			logEntry.album ??= sourceMediaItem.tidalItem.album?.title;
 			let mediaItem = sourceMediaItem;
 			if (settings.useRealMAX) mediaItem = (await mediaItem.max()) ?? mediaItem;
 
@@ -342,9 +461,10 @@ const queueFavoriteDownload = (
 			const { tags } = downloadedTagInfo;
 			const coverUrl = sourceTagInfo.coverUrl ?? downloadedTagInfo.coverUrl;
 			const archiveTags = await getStablePathTags(sourceMediaItem, tags, albumTagOverrides, mediaItem);
-			logEntry.artist = tags.artist?.[0];
-			logEntry.title = String(tags.title ?? "");
-			logEntry.album ??= archiveTags.album;
+			// The TIDAL-first tags: raw flacTags() can name another song (Luna's MusicBrainz fallback).
+			logEntry.artist = archiveTags.artist?.[0] ?? logEntry.artist;
+			logEntry.title = String(archiveTags.title ?? logEntry.title ?? "");
+			logEntry.album = archiveTags.album ?? logEntry.album;
 			const resolvedPlayback = await resolvePlaybackInfo(mediaItem);
 			const { downloadedAudio } = getActualDownloadFormat(resolvedPlayback);
 			const variants = getPathVariants(resolvedPlayback, await getTrackAlbumMarkers(sourceMediaItem, sourceAlbum, isAlbumTrack && settings.useRealMAX));
@@ -361,11 +481,6 @@ const queueFavoriteDownload = (
 			);
 			fileName = addFolderVariants(fileName, variants, multiDiscAlbum);
 			const audioPath = [libraryBase, fileName];
-			const indexedPath = getIndexedDownloadPath(itemId);
-			if (startupResume && indexedPath !== undefined && (await audioFileExists(indexedPath))) {
-				trace.log(`Collection resume skipped indexed track: ${archiveTags.artist?.[0]} - ${archiveTags.title}`);
-				return;
-			}
 
 			if (!((settings.skipExistingFiles || startupResume) && (await audioFileExists(audioPath)))) {
 				const delivered = await downloadWithRetry(mediaItem, audioPath, resolvedPlayback, {
@@ -407,11 +522,11 @@ const queueFavoriteDownload = (
 		})
 		.catch(async (error) => {
 			if (audioSaved) {
-				trace.warn(`Track ${itemId} was saved, but a follow-up step failed: ${String(error)}`);
+				trace.warn(`${describeTrack()} was saved, but a follow-up step failed: ${String(error)}`);
 				return;
 			}
 			if (requeueOnRateLimit(`track:${itemKey}`, error)) {
-				trace.warn(`TIDAL rate limit (429) for track ${itemId}; moved to the end of the queue.`);
+				trace.warn(`TIDAL rate limit (429) for ${describeTrack()}; moved to the end of the queue.`);
 				requeue = true;
 				return;
 			}
@@ -421,7 +536,7 @@ const queueFavoriteDownload = (
 				if (delay !== undefined) {
 					deferredRetryCounts.set(itemKey, retryNumber);
 					trace.warn(
-						`TIDAL server temporarily rejected track ${itemId}; deferred retry ${retryNumber}/${deferredRetryDelays.length} scheduled in ${delay / 60_000} minutes.`,
+						`TIDAL server temporarily rejected ${describeTrack()}; deferred retry ${retryNumber}/${deferredRetryDelays.length} scheduled in ${delay / 60_000} minutes.`,
 					);
 					await logDownload(settings.defaultPath, {
 						...logEntry,
@@ -432,7 +547,7 @@ const queueFavoriteDownload = (
 						queueFavoriteDownload(itemId, fromFavoritedAlbum, albumTagOverrides, sourceAlbum, startupResume, multiDiscAlbum);
 					}, delay);
 				} else {
-					trace.warn(`TIDAL server still rejects track ${itemId}; it will be tried again during the next Collection startup scan.`);
+					trace.warn(`TIDAL server still rejects ${describeTrack()}; it will be tried again during the next Collection startup scan.`);
 					await logDownload(settings.defaultPath, {
 						...logEntry,
 						status: "failed",
@@ -442,7 +557,9 @@ const queueFavoriteDownload = (
 				return;
 			}
 			await logDownload(settings.defaultPath, { ...logEntry, status: "failed", details: String(error) });
-			trace.msg.err.withContext(`Failed to auto-download newly favorited track ${itemId}`)(error);
+			// The startup scan reaches every favorite track, including ones TIDAL no longer serves: log, no toast each.
+			if (startupResume) trace.warn(`Collection scan could not download ${describeTrack()} this time: ${String(error)}`);
+			else trace.msg.err.withContext(`Failed to auto-download ${describeTrack()}`)(error);
 		})
 		.finally(() => {
 			queuedFavoriteIds.delete(itemKey);
@@ -466,6 +583,7 @@ const queueAlbumDownload = (albumId: redux.ItemId, startupResume = false) => {
 
 	autoAlbumQueue = autoAlbumQueue
 		.then(async () => {
+			if (superseded()) return;
 			if (startupResume && isAlbumComplete(albumId)) return;
 			// The queue runs one album at a time, so pacing here throttles the whole scan.
 			if (startupResume) await wait(albumScanPaceMs);
@@ -474,6 +592,7 @@ const queueAlbumDownload = (albumId: redux.ItemId, startupResume = false) => {
 			noteSuccess(`album:${albumKey}`);
 			const mediaItems: MediaItem[] = [];
 			for await (const mediaItem of albumItems) mediaItems.push(mediaItem);
+			await reindexOnStartup();
 			const present = await Promise.all(
 				mediaItems.map(async (mediaItem) => {
 					const indexedPath = getIndexedDownloadPath(mediaItem.id);
@@ -518,24 +637,34 @@ let favoriteStateHydrated = Object.values(initialFavorites).some((itemIds) => it
 let knownFavoriteAlbumIds = new Set(initialFavorites.albums.map(String));
 let startupResumeStarted = false;
 
-const resumeCollectionAlbums = (albumIds: redux.ItemId[]) => {
-	if (startupResumeStarted || !settings.resumeCollectionAlbums || !settings.autoDownloadAlbums) return;
+/**
+ * Favorite albums and favorite tracks: a track favorited while the plugin was not running (TIDAL closed,
+ * Luna missing after a TIDAL update) is only ever caught here.
+ */
+const resumeCollectionAlbums = (albumIds: redux.ItemId[], trackIds: redux.ItemId[]) => {
+	if (superseded() || startupResumeStarted || !settings.resumeCollectionAlbums || !(settings.autoDownloadAlbums || settings.autoDownloadFavorites)) return;
 	startupResumeStarted = true;
 	if (settings.defaultPath === undefined) {
 		trace.warn("Collection resume skipped: set a Library root in Song Downloader Deluxe settings first.");
 		return;
 	}
 	// Re-index first, so albums renamed or moved on disk are recognized instead of downloaded again.
-	void reindexFromLibrary(settings.defaultPath)
-		.then((result) => trace.log(`Library re-indexed before the Collection scan: ${Object.keys(result.entries).length} track(s) from ${result.scanned} file(s).`))
-		.catch((error) => trace.warn(`Library re-index failed, using the existing index: ${String(error)}`))
-		.finally(() => {
+	void reindexOnStartup().finally(() => {
+		if (settings.autoDownloadAlbums) {
 			trace.log(`Startup Collection scan queued ${albumIds.length} favorite album(s). Existing audio files will be skipped.`);
 			for (const albumId of albumIds) queueAlbumDownload(albumId, true);
-		});
+		}
+		if (settings.autoDownloadFavorites) {
+			const tracks = trackIds.filter(isTrackId);
+			trace.log(`Startup Collection scan queued ${tracks.length} favorite track(s). Tracks already in the download index are skipped without contacting TIDAL.`);
+			for (const trackId of tracks) queueFavoriteDownload(trackId, false, undefined, undefined, true);
+		}
+	});
 };
 
-if (favoriteStateHydrated) queueMicrotask(() => resumeCollectionAlbums(initialFavorites.albums));
+// Not only before the Collection scan: also when only favorite auto-downloads are on.
+void reindexOnStartup();
+if (favoriteStateHydrated) queueMicrotask(() => resumeCollectionAlbums(initialFavorites.albums, initialFavorites.tracks));
 
 // "Identify files without TIDAL id" → Replace: a fresh TIDAL download takes the old file's place, and
 // the old file goes to quarantine. Only lossless stereo FLAC replaces a FLAC; anything else is skipped.
@@ -553,6 +682,7 @@ setTidalReplacer(async (root, trackId, path) => {
 	const quarantined = await replaceWithQuarantine(root, path, temporaryPath);
 	noteSuccess(`track:${trackId}`);
 	await afterAudioSaved(`download index for ${archiveTags.title}`, () => rememberDownloadedTrack(trackId, path));
+	queueAlbumExtras(trackId, path);
 	await logDownload(root, {
 		source: "manual",
 		status: "downloaded",
@@ -577,13 +707,13 @@ unloads.add(
 			if (!Object.values(favorites).some((itemIds) => itemIds.length > 0)) return;
 			knownFavoriteAlbumIds = currentAlbumIds;
 			favoriteStateHydrated = true;
-			resumeCollectionAlbums(favorites.albums);
+			resumeCollectionAlbums(favorites.albums, favorites.tracks);
 			return;
 		}
 
 		const addedAlbumIds = favorites.albums.filter((albumId) => !knownFavoriteAlbumIds.has(String(albumId)));
 		knownFavoriteAlbumIds = currentAlbumIds;
-		if (!settings.autoDownloadAlbums) return;
+		if (superseded() || !settings.autoDownloadAlbums) return;
 		for (const albumId of addedAlbumIds) queueAlbumDownload(albumId);
 	}),
 );
@@ -594,7 +724,7 @@ const personalizedRadioPattern =
 	/(?:personal(?:ized|ised)?.{0,32}(?:radio|station)|(?:radio|station).{0,32}personal(?:ized|ised)?)/i;
 
 redux.intercept("content/ADD_MEDIA_ITEM_IDS_TO_FAVORITES", unloads, ({ mediaItemIds, moduleId, name }) => {
-	if (!settings.autoDownloadFavorites) return;
+	if (superseded() || !settings.autoDownloadFavorites) return;
 	const actionContext = `${moduleId ?? ""} ${name ?? ""}`;
 	if (personalizedRadioPattern.test(actionContext)) {
 		trace.log(`Ignored personalized radio favorite action: ${actionContext.trim() || "unknown radio"}`);

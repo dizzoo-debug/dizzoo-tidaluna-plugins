@@ -103,3 +103,31 @@ export const clearCompleteAlbums = () => {
 };
 
 export const completeAlbumCount = () => completeAlbums.size;
+
+/**
+ * Favorite tracks TIDAL could not load (removed from TIDAL, region-locked). With "Look again for
+ * tracks TIDAL could not find" off, the startup scan skips them without asking TIDAL.
+ */
+const unavailableTracksKey = "SongDownloaderDeluxeUnavailableTracks";
+let unavailableTracks = new Set((await storage.get<string[]>(unavailableTracksKey)) ?? []);
+const saveUnavailable = () => {
+	const snapshot = [...unavailableTracks];
+	return queueIndexSave(async () => {
+		await storage.set(unavailableTracksKey, snapshot);
+	});
+};
+export const isTrackUnavailable = (trackId: redux.ItemId) => unavailableTracks.has(String(trackId));
+export const markTrackUnavailable = (trackId: redux.ItemId) => {
+	if (unavailableTracks.has(String(trackId))) return saveQueue;
+	unavailableTracks = new Set([...unavailableTracks, String(trackId)]);
+	return saveUnavailable();
+};
+export const markTrackAvailable = (trackId: redux.ItemId) => {
+	if (!unavailableTracks.delete(String(trackId))) return saveQueue;
+	return saveUnavailable();
+};
+export const clearUnavailableTracks = () => {
+	unavailableTracks = new Set();
+	return saveUnavailable();
+};
+export const unavailableTrackCount = () => unavailableTracks.size;

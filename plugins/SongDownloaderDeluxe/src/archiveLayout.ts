@@ -91,13 +91,15 @@ export const normalizeEdition = (title: string, version?: string | null, genre?:
 };
 
 /**
- * The top folder of an album: soundtracks in "!OST", Various Artists compilations in "!Collections/Various Artists",
- * other albums TIDAL types as COMPILATION in "!Collections", everything else under the album artist.
+ * The top folder of an album: soundtracks in "!OST", Various Artists compilations in "!Compilations/Various Artists",
+ * other compilations (unofficial, or mostly other artists' tracks; see compilationRules.ts) in "!Compilations"
+ * as "Artist - Album (year)", everything else under the album artist. One artist's own official collections
+ * (Greatest Hits, The Platinum Collection) stay in that artist's folder, as the user chose on 2026-11-11.
  */
-export const libraryRootFor = (album: { soundtrack: boolean; variousArtists: boolean; albumType?: string | null; albumArtist: string }) => {
+export const libraryRootFor = (album: { soundtrack: boolean; variousArtists: boolean; otherCompilation?: boolean; albumArtist: string }) => {
 	if (album.soundtrack) return "!OST";
-	if (album.variousArtists) return "!Collections/Various Artists";
-	if (String(album.albumType ?? "").toUpperCase() === "COMPILATION") return "!Collections";
+	if (album.variousArtists) return "!Compilations/Various Artists";
+	if (album.otherCompilation) return "!Compilations";
 	return album.albumArtist;
 };
 

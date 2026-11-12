@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 
-import { brainzIsrcMatches, brainzTitleMatches, selectEmbeddedYear, selectTidalTags, type TagValues, type TidalTagSource } from "./tidalTags";
+import { addFeaturedArtists, brainzIsrcMatches, brainzTitleMatches, selectEmbeddedYear, selectTidalTags, type TagValues, type TidalTagSource } from "./tidalTags";
 
 const letItRoll: TidalTagSource["album"] = {
 	title: "Let It Roll - Songs Of George Harrison",
@@ -118,3 +118,26 @@ assert.equal(brainzIsrcMatches(["GBAYE0901205"], undefined), false);
 assert.equal(brainzIsrcMatches(["GBAYE0901205"], " gbaye0901205 "), true);
 
 console.log("tidalTags tests passed");
+
+// TIDAL lists featured artists without always naming them in the title.
+assert.equal(addFeaturedArtists("Let Us Move On", ["Kendrick Lamar"]), "Let Us Move On (feat. Kendrick Lamar)");
+assert.equal(addFeaturedArtists("One Step Too Far (Radio Edit)", ["Dido"]), "One Step Too Far (feat. Dido) (Radio Edit)");
+assert.equal(addFeaturedArtists("Song", ["B", "C"]), "Song (feat. B & C)");
+assert.equal(addFeaturedArtists("Song", ["B", "C", "D"]), "Song (feat. B, C & D)");
+assert.equal(addFeaturedArtists("Let Us Move On (feat. Kendrick Lamar)", ["Kendrick Lamar"]), "Let Us Move On (feat. Kendrick Lamar)");
+assert.equal(addFeaturedArtists("Communication (KeX Radio Edit) [feat. Slim Gaillard]", ["Slim Gaillard"]), "Communication (KeX Radio Edit) [feat. Slim Gaillard]");
+assert.equal(addFeaturedArtists("Song ft. B", ["B"]), "Song ft. B");
+assert.equal(addFeaturedArtists("Song with B", ["B"]), "Song with B");
+assert.equal(addFeaturedArtists("(I Can't Get No) Satisfaction", ["B"]), "(I Can't Get No) Satisfaction (feat. B)");
+assert.equal(addFeaturedArtists("Defeat", []), "Defeat");
+const featured = selectTidalTags({}, { title: "One Step Too Far", version: "Radio Edit", artists: ["Faithless", "Dido"], featuredArtists: ["Dido"] });
+assert.equal(featured.title, "One Step Too Far (feat. Dido) (Radio Edit)");
+assert.deepEqual(featured.artist, ["Faithless", "Dido"]);
+
+// MusicBrainz's ISRC and barcode are dropped when TIDAL's item does not carry them (Live 8, three tracks off).
+const partial = selectTidalTags({ title: "Superstition", isrc: "UK6821903082", upc: "05025425551130" }, { title: "Superstition", album: { title: "Live 8 (Live, July 2005)" } });
+assert.equal(partial.isrc, undefined);
+assert.equal(partial.upc, undefined);
+const full = selectTidalTags({ isrc: "UK6821903082", upc: "1" }, { title: "Superstition", isrc: "UK6821903085", album: { title: "Live 8 (Live, July 2005)", upc: "5057805433163" } });
+assert.equal(full.isrc, "UK6821903085");
+assert.equal(full.upc, "5057805433163");

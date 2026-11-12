@@ -1,4 +1,4 @@
-import { MediaItem, type redux } from "@luna/lib";
+import { MediaItem, TidalApi, type redux } from "@luna/lib";
 import { showOpenDialog, showSaveDialog } from "@luna/lib.native";
 import { settings } from "./Settings";
 
@@ -10,6 +10,7 @@ import {
 	normalizeEdition,
 	sanitizeLibraryComponent,
 } from "./archiveLayout";
+import { otherCompilationReason } from "./compilations";
 import { formatTidalTitle, selectEmbeddedYear, selectTidalTags, type TagValues } from "./tidalTags";
 
 export { formatTidalTitle, type TagValues };
@@ -35,9 +36,23 @@ export const getStablePathTags = async (
 	/** The item whose flacTags() produced `enrichedTags`, when that is not `mediaItem` (RealMAX). */
 	enrichedFrom: MediaItem = mediaItem,
 ): Promise<ArchiveTagValues> => {
+	// TIDAL's in-app items can be partial (album pages list tracks without ISRC and albums without UPC);
+	// Luna then filled those from MusicBrainz guesses. Ask TIDAL for the full item instead (memoized).
+	if (!mediaItem.tidalItem.isrc) await mediaItem.fetchTidalMediaItem().catch(() => undefined);
 	const item = mediaItem.tidalItem;
-	const album = (await mediaItem.album())?.tidalAlbum;
+	const tidalAlbum = await mediaItem.album();
+	// Without the TIDAL album the MusicBrainz album would decide folder, album and year, and that can be
+	// another release entirely (Trophy by Bat For Lashes landed in a Windham Hill compilation). Callers retry later.
+	if (tidalAlbum === undefined || (item.album?.id !== undefined && String(tidalAlbum.id) !== String(item.album.id))) {
+		throw new Error(`TIDAL album ${item.album?.id ?? "?"} of track ${mediaItem.id} could not be loaded; not saving it with MusicBrainz album data.`);
+	}
+	let album = tidalAlbum.tidalAlbum;
+	if (!album.upc) {
+		const fullAlbum = await TidalApi.album(tidalAlbum.id).catch(() => undefined);
+		if (fullAlbum?.upc) album = { ...album, upc: fullAlbum.upc };
+	}
 	const artists = item.artists?.map(({ name }) => name).filter(Boolean) ?? [];
+	const featuredArtists = item.artists?.filter(({ type }) => type === "FEATURED").map(({ name }) => name).filter(Boolean) ?? [];
 	const albumArtists = album?.artists?.map(({ name }) => name).filter(Boolean) ?? [];
 	// flacTags() already resolved this lookup and brainzItem() is memoized: no extra MusicBrainz request.
 	const brainzItem = await enrichedFrom.brainzItem().catch(() => undefined);
@@ -51,6 +66,7 @@ export const getStablePathTags = async (
 		trackNumber: item.trackNumber,
 		volumeNumber: item.volumeNumber,
 		artists,
+		featuredArtists,
 		isrc: item.isrc,
 		brainzIsrcs,
 		releaseDate: item.releaseDate,
@@ -74,7 +90,8 @@ export const getStablePathTags = async (
 	const { archiveTitle, soundtrack } = normalizeEdition(album?.title ?? selectedAlbumTitle, album?.version, album?.genre);
 	const compilation = !soundtrack && isVariousArtists(albumArtistNames.filter(Boolean));
 
-	mergedTags.libraryRoot = libraryRootFor({ soundtrack, variousArtists: compilation, albumType: album?.type, albumArtist });
+	const otherReason = soundtrack || compilation ? undefined : await otherCompilationReason(tidalAlbum, settings.compilationList);
+	mergedTags.libraryRoot = libraryRootFor({ soundtrack, variousArtists: compilation, otherCompilation: otherReason !== undefined, albumArtist });
 	mergedTags.archiveAlbumArtist = compilation ? "Various Artists" : albumArtist;
 	mergedTags.archiveAlbumTitle = archiveTitle;
 	// Only technical markers go after the year (" [Atmos]", added later); editions are in the title.
@@ -90,7 +107,7 @@ export const applyTagFormat = (format: string, tags: ArchiveTagValues) =>
 		// " [Atmos]" or empty: keep the leading space and never turn an empty suffix into "Unknown".
 		if (tag === "variantSuffix") return tagValue.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "");
 		if (tag === "trackNumber") tagValue = tagValue.padStart(2, "0");
-		// "!Collections/Various Artists" is two folders: each part is sanitized on its own.
+		// "!Compilations/Various Artists" is two folders: each part is sanitized on its own.
 		if (tag === "libraryRoot") return tagValue.split("/").map(sanitizeLibraryComponent).join("/");
 		return sanitizeLibraryComponent(tagValue);
 	});
