@@ -1,5 +1,5 @@
-import { access, appendFile, constants, mkdir, readdir, rename, stat, writeFile } from "fs/promises";
-import { basename, dirname, join, relative } from "path";
+import { access, appendFile, constants, copyFile, mkdir, readdir, readFile, rename, rmdir, stat, unlink, writeFile } from "fs/promises";
+import { basename, dirname, isAbsolute, join, relative } from "path";
 
 const resolvePath = (filePath: string | string[]) => (Array.isArray(filePath) ? join(...filePath) : filePath);
 
@@ -67,22 +67,84 @@ export const saveTextFileNextToAudio = async (
 	}
 };
 
-/**
- * Puts a freshly downloaded file in place of an existing one. The old file is never deleted: it moves
- * to <root>/_SongDownloader_Quarantine under its own relative path (numbered if that is taken).
- */
-export const replaceWithQuarantine = async (root: string, oldPath: string, newPath: string) => {
-	if (!(await audioFileExists(newPath))) throw new Error(`Downloaded file is missing: ${newPath}`);
-	const base = join(root, "_SongDownloader_Quarantine", relative(root, oldPath));
+/** The quarantine folder: the one chosen in settings, or <root>/_SongDownloader_Quarantine. */
+export const quarantineFolderFor = (root: string, chosen?: string) => (chosen ? chosen : join(root, "_SongDownloader_Quarantine"));
+
+/** Under the quarantine folder by the file's path relative to the library root, numbered if that is taken. */
+const quarantinePathFor = async (root: string, quarantineFolder: string, filePath: string) => {
+	const inside = relative(root, filePath);
+	if (inside === "" || inside.startsWith("..") || isAbsolute(inside)) throw new Error(`Not inside the library root: ${filePath}`);
+	const base = join(quarantineFolder, inside);
 	let quarantinePath = base;
 	for (let n = 2; await fileExists(quarantinePath); n++) quarantinePath = base.replace(/(\.[^.\\/]+)?$/, ` (${n})$1`);
 	await mkdir(dirname(quarantinePath), { recursive: true });
-	await rename(oldPath, quarantinePath);
+	return quarantinePath;
+};
+
+// rename() cannot cross drives: a quarantine folder on another drive gets a copy, then the original is removed.
+const moveFile = async (from: string, to: string) => {
+	try {
+		await rename(from, to);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EXDEV") throw error;
+		await copyFile(from, to, constants.COPYFILE_EXCL);
+		if ((await stat(to)).size !== (await stat(from)).size) throw new Error(`Copy to quarantine is incomplete: ${to}`);
+		await unlink(from);
+	}
+};
+
+const moveToQuarantine = async (root: string, quarantineFolder: string, filePath: string) => {
+	const quarantinePath = await quarantinePathFor(root, quarantineFolder, filePath);
+	await moveFile(filePath, quarantinePath);
+	return quarantinePath;
+};
+
+const audioFilePattern = /\.(flac|m4a|mp4|mp3|aac|wav|ogg|opus|wma|aiff?)$/i;
+
+const filesUnder = async (folder: string): Promise<string[]> => {
+	const entries = await readdir(folder, { withFileTypes: true }).catch(() => []);
+	const nested = await Promise.all(
+		entries.map((entry) => (entry.isDirectory() ? filesUnder(join(folder, entry.name)) : Promise.resolve([join(folder, entry.name)]))),
+	);
+	return nested.flat();
+};
+
+/**
+ * An unfavorited track goes to quarantine. Cover art and credits stay while the album has any audio
+ * left; once it has none, everything in the album folder (CD folders included) follows and the empty
+ * folders are removed. Returns the quarantine paths.
+ */
+export const quarantineTrack = async (root: string, quarantineFolder: string, audioPath: string | string[]) => {
+	const filePath = resolvePath(audioPath);
+	const moved = [await moveToQuarantine(root, quarantineFolder, filePath)];
+	const folder = dirname(filePath);
+	const albumFolder = /^CD\d+$/i.test(basename(folder)) ? dirname(folder) : folder;
+	// Only a real album folder (Artist\Album or deeper), never an artist folder or the root itself.
+	if (relative(root, albumFolder).split(/[\\/]/).filter(Boolean).length < 2) return moved;
+	const rest = await filesUnder(albumFolder);
+	if (rest.some((file) => audioFilePattern.test(file))) return moved;
+	for (const file of rest) moved.push(await moveToQuarantine(root, quarantineFolder, file));
+	const folders = (await readdir(albumFolder, { withFileTypes: true }).catch(() => []))
+		.filter((entry) => entry.isDirectory())
+		.map((entry) => join(albumFolder, entry.name));
+	// rmdir only removes empty folders: anything left behind keeps its folder.
+	for (const emptyFolder of [...folders, albumFolder]) await rmdir(emptyFolder).catch(() => undefined);
+	return moved;
+};
+
+/**
+ * Puts a freshly downloaded file in place of an existing one. The old file is never deleted: it moves
+ * to the quarantine folder under its own relative path (numbered if that is taken).
+ */
+export const replaceWithQuarantine = async (root: string, quarantineFolder: string, oldPath: string, newPath: string) => {
+	if (!(await audioFileExists(newPath))) throw new Error(`Downloaded file is missing: ${newPath}`);
+	const quarantinePath = await quarantinePathFor(root, quarantineFolder, oldPath);
+	await moveFile(oldPath, quarantinePath);
 	try {
 		await rename(newPath, oldPath);
 	} catch (error) {
 		// Put the original back rather than leave a hole in the album.
-		await rename(quarantinePath, oldPath).catch(() => undefined);
+		await moveFile(quarantinePath, oldPath).catch(() => undefined);
 		throw error;
 	}
 	return quarantinePath;
@@ -106,4 +168,14 @@ export const writeLibraryReport = async (rootPath: string, fileName: string, tex
 	const reportPath = join(rootPath, fileName);
 	await writeFile(reportPath, text, "utf8");
 	return reportPath;
+};
+
+/** Reads a file at the library root (such as a list written for the plugin), or undefined when it is missing. */
+export const readLibraryReport = async (rootPath: string, fileName: string) => {
+	try {
+		return await readFile(join(rootPath, fileName), "utf8");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw error;
+	}
 };

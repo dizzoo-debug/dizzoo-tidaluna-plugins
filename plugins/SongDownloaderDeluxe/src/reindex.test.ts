@@ -76,6 +76,11 @@ try {
 	assert.equal(result.withoutId, 3);
 	assert.deepEqual(result.sameAudioAsIdentified.map((d) => d.id), ["43"]);
 	assert.equal(result.unidentified.length, 2);
+	// A quarantine folder chosen in settings, inside the library under another name, is skipped too.
+	await mkdir(join(root, "Holding", "Artist"), { recursive: true });
+	await writeFile(join(root, "Holding", "Artist", "01 - Artist - Gone.flac"), flac(["COMMENT=http://www.tidal.com/track/88"]));
+	assert.equal((await reindexLibrary(root)).entries["88"] !== undefined, true);
+	assert.equal((await reindexLibrary(root, join(root, "holding"))).entries["88"], undefined);
 } finally {
 	await rm(root, { recursive: true, force: true });
 }

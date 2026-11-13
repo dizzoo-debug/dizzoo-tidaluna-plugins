@@ -1,8 +1,9 @@
 import { Tracer, type LunaUnload } from "@luna/core";
-import { Album, ContextMenu, getPlaybackInfo, MediaItem, redux, safeInterval, safeTimeout, StyleTag } from "@luna/lib";
+import { Album, ContextMenu, getCredentials, getPlaybackInfo, MediaItem, redux, safeInterval, safeTimeout, StyleTag, TidalApi } from "@luna/lib";
 
 import { makeAlbumCreditsText, makeAlbumCreditsTextForAlbum } from "./credits";
 import {
+	forgetDownloadedFile,
 	getIndexedDownloadPath,
 	isAlbumComplete,
 	isTrackUnavailable,
@@ -11,11 +12,21 @@ import {
 	markTrackUnavailable,
 	rememberDownloadedTrack,
 	reindexFromLibrary,
+	trackIdsForPath,
 } from "./downloadIndex";
 import { logDownload, type DownloadLogEntry } from "./downloadLog";
 import { atmosAvailable, getAtmosPlaybackInfo, hasAtmosLogin } from "./atmos";
 import { safeDownload, safeDownloadProgress } from "./download.native";
-import { albumExtrasPresent, audioFileExists, fileExists, replaceWithQuarantine, saveCoverArt, saveTextFileNextToAudio } from "./files.native";
+import {
+	albumExtrasPresent,
+	audioFileExists,
+	fileExists,
+	quarantineFolderFor,
+	quarantineTrack,
+	replaceWithQuarantine,
+	saveCoverArt,
+	saveTextFileNextToAudio,
+} from "./files.native";
 import { setTidalReplacer } from "./identifyLibrary";
 import {
 	applyTagFormat,
@@ -57,8 +68,16 @@ const creditsButton = ContextMenu.addButton(unloads);
 const downloadState = { active: false, cancel: false };
 
 const queuedFavoriteIds = new Set<string>();
-const albumTrackIds = new Set<string>();
+/** Track id → the Collection album that queued it. */
+const albumTrackIds = new Map<string, string>();
 const queuedAlbumIds = new Set<string>();
+/** Favorites added on another device (the phone) that the desktop app has not loaded; see pollCollection. */
+const otherDeviceTracks = new Set<string>();
+const otherDeviceAlbums = new Set<string>();
+const isFavoriteTrack = (trackId: redux.ItemId) =>
+	otherDeviceTracks.has(String(trackId)) || redux.store.getState().favorites.tracks.some((favoriteId) => String(favoriteId) === String(trackId));
+const isFavoriteAlbum = (albumId: redux.ItemId) =>
+	otherDeviceAlbums.has(String(albumId)) || redux.store.getState().favorites.albums.some((favoriteId) => String(favoriteId) === String(albumId));
 const deferredRetryCounts = new Map<string, number>();
 let autoDownloadQueue = Promise.resolve();
 let autoAlbumQueue = Promise.resolve();
@@ -397,7 +416,7 @@ const queueFavoriteDownload = (
 	multiDiscAlbum?: boolean,
 ) => {
 	const itemKey = String(itemId);
-	if (fromFavoritedAlbum) albumTrackIds.add(itemKey);
+	if (fromFavoritedAlbum && sourceAlbum !== undefined) albumTrackIds.set(itemKey, String(sourceAlbum.id));
 	if (queuedFavoriteIds.has(itemKey)) return;
 	queuedFavoriteIds.add(itemKey);
 	// Filled in as the track resolves, so a failure can still be logged with whatever is known.
@@ -434,9 +453,14 @@ const queueFavoriteDownload = (
 			// The startup scan may reach many missing tracks: pace them like albums.
 			if (startupResume) await wait(albumScanPaceMs);
 			await waitForRateLimit();
-			const isAlbumTrack = albumTrackIds.has(itemKey);
-			if (isAlbumTrack ? !settings.autoDownloadAlbums : !settings.autoDownloadFavorites) return;
-			if (!isAlbumTrack && !redux.store.getState().favorites.tracks.some((favoriteId) => String(favoriteId) === itemKey)) return;
+			// Still wanted? An album removed from the Collection drops its queued tracks, unless the track is a favorite itself.
+			const albumKey = albumTrackIds.get(itemKey);
+			const isAlbumTrack = albumKey !== undefined && isFavoriteAlbum(albumKey);
+			const isTrackFavorite = isFavoriteTrack(itemKey);
+			if (!((isAlbumTrack && settings.autoDownloadAlbums) || (isTrackFavorite && settings.autoDownloadFavorites))) {
+				if (albumKey !== undefined && !isAlbumTrack && !isTrackFavorite) trace.log(`Not downloading track ${itemId}: its album was removed from the Collection.`);
+				return;
+			}
 			const libraryBase = settings.defaultPath;
 			if (libraryBase === undefined) {
 				trace.warn("Auto-download skipped: set a Library root in Song Downloader Deluxe settings first.");
@@ -634,7 +658,7 @@ const queueAlbumDownload = (albumId: redux.ItemId, startupResume = false) => {
 
 const initialFavorites = redux.store.getState().favorites;
 let favoriteStateHydrated = Object.values(initialFavorites).some((itemIds) => itemIds.length > 0);
-let knownFavoriteAlbumIds = new Set(initialFavorites.albums.map(String));
+let knownFavoriteAlbumIds = new Set<string>(initialFavorites.albums.map(String));
 let startupResumeStarted = false;
 
 /**
@@ -666,6 +690,94 @@ const resumeCollectionAlbums = (albumIds: redux.ItemId[], trackIds: redux.ItemId
 void reindexOnStartup();
 if (favoriteStateHydrated) queueMicrotask(() => resumeCollectionAlbums(initialFavorites.albums, initialFavorites.tracks));
 
+/**
+ * "Move unfavorited tracks to quarantine". Only a removal made here, while the plugin runs, counts: the
+ * favorites list shrinking within seconds of TIDAL confirming a removal. A list that shrinks for any
+ * other reason (a sync, a reload) moves nothing, and neither does a removal of more tracks at once than
+ * a person would make by hand.
+ */
+let knownFavoriteTrackIds = new Set<string>(initialFavorites.tracks.map(String));
+const removedFavoriteTracks = new Map<string, number>();
+let lastFavoriteRemovalAt = 0;
+const removalWindowMs = 15_000;
+const maxRemovedAtOnce = 25;
+let unfavoriteCheckPending = false;
+let unfavoriteQueue = Promise.resolve();
+
+const noteRemovedFavoriteTracks = (currentTrackIds: Set<string>) => {
+	const now = Date.now();
+	for (const trackId of knownFavoriteTrackIds) {
+		if (currentTrackIds.has(trackId)) continue;
+		removedFavoriteTracks.set(trackId, now);
+		otherDeviceTracks.delete(trackId);
+	}
+	for (const trackId of currentTrackIds) removedFavoriteTracks.delete(trackId);
+	const removedSome = [...knownFavoriteTrackIds].some((trackId) => !currentTrackIds.has(trackId));
+	knownFavoriteTrackIds = currentTrackIds;
+	if (removedSome) scheduleUnfavoriteCheck();
+};
+
+const scheduleUnfavoriteCheck = () => {
+	if (unfavoriteCheckPending) return;
+	unfavoriteCheckPending = true;
+	// The list change and TIDAL's confirmation arrive in either order: look once both are in.
+	safeTimeout(unloads, () => {
+		unfavoriteCheckPending = false;
+		checkUnfavoritedTracks();
+	}, 2000);
+};
+
+const checkUnfavoritedTracks = () => {
+	const root = settings.defaultPath;
+	if (superseded() || !settings.quarantineUnfavoritedTracks || root === undefined) {
+		removedFavoriteTracks.clear();
+		return;
+	}
+	const now = Date.now();
+	const confirmed: string[] = [];
+	for (const [trackId, removedAt] of removedFavoriteTracks) {
+		if (Math.abs(removedAt - lastFavoriteRemovalAt) <= removalWindowMs) confirmed.push(trackId);
+		// Unconfirmed and old: the list changed for another reason. Never acted on later.
+		if (confirmed.includes(trackId) || now - removedAt > removalWindowMs) removedFavoriteTracks.delete(trackId);
+	}
+	if (confirmed.length === 0) return;
+	if (confirmed.length > maxRemovedAtOnce) {
+		trace.warn(`${confirmed.length} tracks left the favorites at once; not moving any of them to quarantine. Move them by hand if that was intended.`);
+		return;
+	}
+	for (const trackId of confirmed) queueUnfavoritedTrack(trackId, root);
+};
+
+const queueUnfavoritedTrack = (trackId: string, root: string) => {
+	unfavoriteQueue = unfavoriteQueue.then(async () => {
+		if (isFavoriteTrack(trackId)) return;
+		const path = getIndexedDownloadPath(trackId);
+		if (path === undefined || !(await audioFileExists(path))) return;
+		// The file can stand for other ids too (a RealMAX substitute): keep it while any of them is a favorite.
+		const sharedFavorite = trackIdsForPath(path).some(isFavoriteTrack);
+		if (sharedFavorite) return;
+		const mediaItem = await MediaItem.fromId(trackId, "track").catch(() => undefined);
+		const albumId = mediaItem?.tidalItem.album?.id;
+		const label = mediaItem ? `${mediaItem.tidalItem.artists?.[0]?.name ?? ""} - ${formatTidalTitle(mediaItem.tidalItem.title, mediaItem.tidalItem.version)}` : `track ${trackId}`;
+		// Without its album we cannot tell whether a Collection album still holds it: keep the file.
+		if (albumId === undefined) {
+			trace.warn(`Kept unfavorited ${label}: TIDAL did not say which album it is on.`);
+			return;
+		}
+		if (isFavoriteAlbum(albumId)) {
+			trace.log(`Kept unfavorited ${label}: its album is in your Collection.`);
+			return;
+		}
+		try {
+			const moved = await quarantineTrack(root, quarantineFolderFor(root, settings.quarantineFolder), path);
+			await forgetDownloadedFile(path, albumId);
+			trace.msg.log(`Moved unfavorited ${label} to quarantine${moved.length > 1 ? ` (album now empty: ${moved.length - 1} more file(s) moved)` : ""}.`);
+		} catch (error) {
+			trace.warn(`Could not move unfavorited ${label} to quarantine: ${String(error)}`);
+		}
+	});
+};
+
 // "Identify files without TIDAL id" → Replace: a fresh TIDAL download takes the old file's place, and
 // the old file goes to quarantine. Only lossless stereo FLAC replaces a FLAC; anything else is skipped.
 setTidalReplacer(async (root, trackId, path) => {
@@ -679,7 +791,7 @@ setTidalReplacer(async (root, trackId, path) => {
 	if (isAtmos || getFileExtension(resolvedPlayback.playbackInfo) !== "flac") return `TIDAL serves it as ${downloadedAudio ?? "non-FLAC"}, kept the existing file`;
 	const temporaryPath = path.replace(/\.flac$/i, ".tidal-new.flac");
 	const delivered = await downloadWithRetry(mediaItem, temporaryPath, resolvedPlayback, { tags: getEmbeddedTags(archiveTags), coverUrl });
-	const quarantined = await replaceWithQuarantine(root, path, temporaryPath);
+	const quarantined = await replaceWithQuarantine(root, quarantineFolderFor(root, settings.quarantineFolder), path, temporaryPath);
 	noteSuccess(`track:${trackId}`);
 	await afterAudioSaved(`download index for ${archiveTags.title}`, () => rememberDownloadedTrack(trackId, path));
 	queueAlbumExtras(trackId, path);
@@ -702,20 +814,61 @@ setTidalReplacer(async (root, trackId, path) => {
 unloads.add(
 	redux.store.subscribe(() => {
 		const favorites = redux.store.getState().favorites;
-		const currentAlbumIds = new Set(favorites.albums.map(String));
+		const currentAlbumIds = new Set<string>(favorites.albums.map(String));
+		const currentTrackIds = new Set<string>(favorites.tracks.map(String));
 		if (!favoriteStateHydrated) {
 			if (!Object.values(favorites).some((itemIds) => itemIds.length > 0)) return;
 			knownFavoriteAlbumIds = currentAlbumIds;
+			knownFavoriteTrackIds = currentTrackIds;
 			favoriteStateHydrated = true;
 			resumeCollectionAlbums(favorites.albums, favorites.tracks);
 			return;
 		}
 
+		noteRemovedFavoriteTracks(currentTrackIds);
+
 		const addedAlbumIds = favorites.albums.filter((albumId) => !knownFavoriteAlbumIds.has(String(albumId)));
+		// Removed here: no longer counts as a favorite from the other device either.
+		for (const albumId of knownFavoriteAlbumIds) if (!currentAlbumIds.has(albumId)) otherDeviceAlbums.delete(albumId);
 		knownFavoriteAlbumIds = currentAlbumIds;
 		if (superseded() || !settings.autoDownloadAlbums) return;
 		for (const albumId of addedAlbumIds) queueAlbumDownload(albumId);
 	}),
+);
+
+/**
+ * The desktop app does not see tracks and albums added to the Collection on the phone until it restarts.
+ * Every 30 minutes one request asks TIDAL for the Collection's ids and the new ones are downloaded.
+ * Removals on the phone are ignored: only a removal made here moves a file (see checkUnfavoritedTracks).
+ */
+const collectionPollMs = 30 * 60_000;
+const pollCollection = async () => {
+	if (superseded() || !favoriteStateHydrated || settings.defaultPath === undefined) return;
+	if (!(settings.autoDownloadFavorites || settings.autoDownloadAlbums)) return;
+	await waitForRateLimit();
+	const { userId } = await getCredentials();
+	const response = await fetch(`https://desktop.tidal.com/v1/users/${userId}/favorites/ids?${TidalApi.queryArgs()}`, {
+		headers: await TidalApi.getAuthHeaders(),
+		cache: "no-store",
+		signal: AbortSignal.timeout(30_000),
+	});
+	if (!response.ok) throw new Error(`TIDAL Collection ids ${response.status} ${response.statusText}`);
+	const ids = (await response.json()) as { TRACK?: redux.ItemId[]; ALBUM?: redux.ItemId[] };
+	const newTracks = (ids.TRACK ?? []).map(String).filter((trackId) => isTrackId(trackId) && !isFavoriteTrack(trackId));
+	const newAlbums = (ids.ALBUM ?? []).map(String).filter((albumId) => !isFavoriteAlbum(albumId));
+	if (newTracks.length === 0 && newAlbums.length === 0) return;
+	trace.log(`Collection check: ${newTracks.length} track(s) and ${newAlbums.length} album(s) added on another device.`);
+	for (const trackId of newTracks) otherDeviceTracks.add(trackId);
+	for (const albumId of newAlbums) otherDeviceAlbums.add(albumId);
+	if (settings.autoDownloadAlbums) for (const albumId of newAlbums) queueAlbumDownload(albumId, true);
+	if (settings.autoDownloadFavorites) for (const trackId of newTracks) queueFavoriteDownload(trackId, false, undefined, undefined, true);
+};
+safeInterval(
+	unloads,
+	() => {
+		pollCollection().catch((error) => trace.warn(`Collection check failed, trying again in 30 minutes: ${String(error)}`));
+	},
+	collectionPollMs,
 );
 
 const pendingFavoriteIds: redux.ItemId[] = [];
@@ -736,6 +889,10 @@ redux.intercept("content/ADD_MEDIA_ITEM_IDS_TO_FAVORITES", unloads, ({ mediaItem
 		trace.log(`Ignored ${mediaItemIds.length - trackIds.length} non-track favorite item(s), such as a mix or radio station.`);
 	}
 	pendingFavoriteIds.push(...trackIds);
+});
+redux.intercept("content/REMOVE_ITEMS_FROM_FAVORITES_SUCCESS", unloads, () => {
+	lastFavoriteRemovalAt = Date.now();
+	scheduleUnfavoriteCheck();
 });
 redux.intercept("content/ADD_ITEMS_TO_FAVORITES_SUCCESS", unloads, () => {
 	const itemIds = pendingFavoriteIds.splice(0);

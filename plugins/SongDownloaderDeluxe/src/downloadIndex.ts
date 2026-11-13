@@ -44,8 +44,14 @@ export const rememberDownloadedTrack = (itemId: redux.ItemId, path: DownloadPath
  * Points the index at the files as they are on disk now, read from the TIDAL track id each FLAC
  * carries. Renamed or moved albums are then recognized and never downloaded again. Disk only.
  */
+// The quarantine folder chosen in settings (set by Settings, which this module cannot import): never indexed.
+let quarantineFolder: string | undefined;
+export const setIndexQuarantineFolder = (folder: string | undefined) => {
+	quarantineFolder = folder;
+};
+
 export const reindexFromLibrary = async (root: string) => {
-	const result = await reindexLibrary(root);
+	const result = await reindexLibrary(root, quarantineFolder);
 	downloadIndex = { ...downloadIndex, ...result.entries };
 	const snapshot = downloadIndex;
 	await queueIndexSave(async () => {
@@ -84,6 +90,27 @@ export const addIndexEntries = (entries: Record<string, DownloadPath>) => {
  * TIDAL anything, which is most of a large Collection after the first scan.
  */
 export const isAlbumComplete = (albumId: redux.ItemId) => completeAlbums.has(String(albumId));
+
+const pathKey = (path: DownloadPath) => (Array.isArray(path) ? path.join("\\") : path).replaceAll("/", "\\").toLowerCase();
+
+/** Every track id whose index entry points at this file (a RealMAX substitute shares its file). */
+export const trackIdsForPath = (path: DownloadPath) => {
+	const key = pathKey(path);
+	return Object.keys(downloadIndex).filter((id) => pathKey(downloadIndex[id]) === key);
+};
+
+/** The file left the library: drop its index entries, and its album is no longer complete. */
+export const forgetDownloadedFile = (path: DownloadPath, albumId?: redux.ItemId) => {
+	const key = pathKey(path);
+	downloadIndex = Object.fromEntries(Object.entries(downloadIndex).filter(([, entry]) => pathKey(entry) !== key));
+	const snapshot = downloadIndex;
+	if (albumId !== undefined) completeAlbums.delete(String(albumId));
+	const albums = [...completeAlbums];
+	return queueIndexSave(async () => {
+		await storage.set(storageKey, snapshot);
+		await storage.set(completeAlbumsKey, albums);
+	});
+};
 
 export const markAlbumComplete = (albumId: redux.ItemId) => {
 	if (completeAlbums.has(String(albumId))) return saveQueue;

@@ -1,5 +1,5 @@
 import { open, readdir } from "fs/promises";
-import { basename, dirname, join } from "path";
+import { basename, dirname, join, resolve } from "path";
 
 const QUARANTINE = "_SongDownloader_Quarantine";
 const tidalTrackUrl = /tidal\.com\/(?:browse\/)?track\/(\d+)/i;
@@ -126,7 +126,8 @@ export type ReindexResult = {
  * names are now. Nothing is written to disk and TIDAL is never contacted. The quarantine folder is
  * left out, so a quarantined copy never stands in for a missing library file.
  */
-export const reindexLibrary = async (root: string): Promise<ReindexResult> => {
+export const reindexLibrary = async (root: string, quarantineFolder?: string): Promise<ReindexResult> => {
+	const chosenQuarantine = quarantineFolder ? resolve(quarantineFolder).toLowerCase() : undefined;
 	const result: ReindexResult = { entries: {}, scanned: 0, withoutId: 0, failed: 0, unidentified: [], sameAudioAsIdentified: [] };
 	const idByAudio = new Map<string, { id: string; path: string }>();
 	const unidentifiedAudio = new Map<string, string>();
@@ -141,7 +142,8 @@ export const reindexLibrary = async (root: string): Promise<ReindexResult> => {
 		for (const entry of entries) {
 			const path = join(dir, entry.name);
 			if (entry.isDirectory()) {
-				if (entry.name !== QUARANTINE && !entry.name.endsWith(".merge-tmp")) await walk(path);
+				const skipped = entry.name === QUARANTINE || entry.name.endsWith(".merge-tmp") || resolve(path).toLowerCase() === chosenQuarantine;
+				if (!skipped) await walk(path);
 				continue;
 			}
 			if (!/\.flac$/i.test(entry.name)) continue;

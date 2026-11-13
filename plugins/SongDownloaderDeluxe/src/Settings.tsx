@@ -3,8 +3,17 @@ import { MediaItem, Quality, redux } from "@luna/lib";
 import { LunaButtonSetting, LunaSelectItem, LunaSelectSetting, LunaSettings, LunaSwitchSetting, LunaTextSetting, LunaTitle } from "@luna/ui";
 
 import React from "react";
+import { albumSearchListName, albumSearchResultName, searchListedAlbums } from "./albumSearch";
 import { atmosAvailable, hasAtmosLogin, signInAtmos, signOutAtmos } from "./atmos";
-import { clearCompleteAlbums, completeAlbumCount, isAlbumComplete, keepOutsideTidal, reindexFromLibrary, unavailableTrackCount } from "./downloadIndex";
+import {
+	clearCompleteAlbums,
+	completeAlbumCount,
+	isAlbumComplete,
+	keepOutsideTidal,
+	reindexFromLibrary,
+	setIndexQuarantineFolder,
+	unavailableTrackCount,
+} from "./downloadIndex";
 import { openExternal } from "@luna/lib.native";
 import { getDownloadFolder } from "./helpers";
 import type { IdentifyResult } from "./identify";
@@ -25,6 +34,9 @@ type Settings = {
 	autoDownloadAlbums: boolean;
 	resumeCollectionAlbums: boolean;
 	retryUnavailableTracks: boolean;
+	quarantineUnfavoritedTracks: boolean;
+	/** Unset: <Library root>\_SongDownloader_Quarantine. */
+	quarantineFolder?: string;
 	compilationList: string;
 	libraryLayoutVersion: number;
 };
@@ -44,6 +56,7 @@ const defaultSettings: Settings = {
 	autoDownloadAlbums: true,
 	resumeCollectionAlbums: true,
 	retryUnavailableTracks: true,
+	quarantineUnfavoritedTracks: false,
 	compilationList: "",
 	libraryLayoutVersion: 2,
 };
@@ -88,6 +101,7 @@ if (layoutMigration) await clearCompleteAlbums();
 export const settings = await ReactiveStore.getPluginStorage<Settings>("SongDownloaderCustom", defaultSettings);
 
 if (settings.multiDiscPathFormat === undefined) settings.multiDiscPathFormat = defaultSettings.multiDiscPathFormat;
+setIndexQuarantineFolder(settings.quarantineFolder);
 
 // Sanitize download quality
 if (Quality.fromAudioQuality(settings.downloadQuality) === undefined) settings.downloadQuality = Quality.Max.audioQuality;
@@ -113,6 +127,8 @@ export const Settings = () => {
 	const [autoDownloadAlbums, setAutoDownloadAlbums] = React.useState(settings.autoDownloadAlbums);
 	const [resumeCollectionAlbums, setResumeCollectionAlbums] = React.useState(settings.resumeCollectionAlbums);
 	const [retryUnavailableTracks, setRetryUnavailableTracks] = React.useState(settings.retryUnavailableTracks);
+	const [quarantineUnfavoritedTracks, setQuarantineUnfavoritedTracks] = React.useState(settings.quarantineUnfavoritedTracks);
+	const [quarantineFolder, setQuarantineFolder] = React.useState(settings.quarantineFolder);
 	// Collection albums found complete on disk, and those the startup scan still checks with TIDAL.
 	const collectionState = () => {
 		const albums = redux.store.getState().favorites.albums;
@@ -130,6 +146,7 @@ export const Settings = () => {
 	const [replaceStatus, setReplaceStatus] = React.useState<string>();
 	const [notFound, setNotFound] = React.useState<IdentifyResult["notFound"]>([]);
 	const [keepStatus, setKeepStatus] = React.useState<string>();
+	const [albumSearchStatus, setAlbumSearchStatus] = React.useState<string>();
 	const [atmosLink, setAtmosLink] = React.useState<{ verificationUri: string; userCode: string }>();
 	const [atmosStatus, setAtmosStatus] = React.useState<string | undefined>(hasAtmosLogin() ? "Signed in to Dolby Atmos." : undefined);
 
@@ -294,6 +311,12 @@ export const Settings = () => {
 				checked={retryUnavailableTracks}
 				onChange={(_, checked) => setRetryUnavailableTracks((settings.retryUnavailableTracks = checked))}
 			/>
+			<LunaSwitchSetting
+				title="Move unfavorited tracks to quarantine"
+				desc="When you remove a track from your favorites here in TIDAL, its downloaded file moves to the quarantine folder (nothing is deleted). Kept when its album is in your Collection. Cover and credits follow only once the album has no tracks left. Removing an album moves nothing; its tracks not downloaded yet are dropped from the queue, favorite tracks still download."
+				checked={quarantineUnfavoritedTracks}
+				onChange={(_, checked) => setQuarantineUnfavoritedTracks((settings.quarantineUnfavoritedTracks = checked))}
+			/>
 			<LunaButtonSetting
 				title="Re-check complete albums"
 				desc={`${completeAlbums.complete} of ${completeAlbums.all} Collection album(s) were found complete on disk and are skipped by the startup scan without contacting TIDAL; ${completeAlbums.all - completeAlbums.complete} not complete, so the scan checks them again${completeAlbums.other > 0 ? ` (and ${completeAlbums.other} complete album(s) no longer in the Collection)` : ""}. Reset this after deleting or moving music files.`}
@@ -376,7 +399,7 @@ export const Settings = () => {
 					title="Replace identified files with TIDAL downloads"
 					desc={
 						<>
-							Downloads the {identified.length} identified track(s) from TIDAL with the TIDAL id, cover and tags embedded, and puts each one in place of the old file under the same name. The old files move to _SongDownloader_Quarantine; nothing is deleted. A track TIDAL only serves as Atmos or non-FLAC is skipped.
+							Downloads the {identified.length} identified track(s) from TIDAL with the TIDAL id, cover and tags embedded, and puts each one in place of the old file under the same name. The old files move to the quarantine folder; nothing is deleted. A track TIDAL only serves as Atmos or non-FLAC is skipped.
 							{identified.some((f) => f.fromOtherAlbum) && " Files matched from another album get that album's copy of the same recording."}
 							{replaceStatus && (
 								<>
@@ -437,6 +460,37 @@ export const Settings = () => {
 					children="Keep"
 				/>
 			)}
+			<LunaButtonSetting
+				title="Find listed albums on TIDAL"
+				desc={
+					<>
+						Looks up each album in {albumSearchListName} at the library root (one album search per album, 1.5 s apart, stopping at the first 429) and writes what TIDAL offers to {albumSearchResultName}, so whole releases can be added to the Collection instead of loose tracks. Run it again after a 429: albums already looked up are skipped.
+						{albumSearchStatus && (
+							<>
+								<br />
+								{albumSearchStatus}
+							</>
+						)}
+					</>
+				}
+				sx={{ whiteSpace: "nowrap", flexShrink: 0, minWidth: "max-content" }}
+				disabled={defaultPath === undefined || albumSearchStatus?.startsWith("Looking up")}
+				onClick={async () => {
+					const root = settings.defaultPath;
+					if (root === undefined) return;
+					setAlbumSearchStatus("Looking up albums…");
+					try {
+						const result = await searchListedAlbums(root, (done, total) => setAlbumSearchStatus(`Looking up ${Math.min(done + 1, total)} / ${total} album(s)…`));
+						setAlbumSearchStatus(
+							`Looked up ${result.looked} of ${result.total} album(s)` +
+								(result.stoppedByRateLimit ? "; stopped: TIDAL answered 429, run again later." : `; saved to ${albumSearchResultName}.`),
+						);
+					} catch (error) {
+						setAlbumSearchStatus(`Album lookup failed: ${String(error)}`);
+					}
+				}}
+				children="Find albums"
+			/>
 			<FormatSetting
 				title="Always put in !Compilations"
 				desc={
@@ -484,6 +538,25 @@ export const Settings = () => {
 					// Cancelling the folder dialog keeps the current root.
 					const folder = await getDownloadFolder();
 					if (folder !== undefined) setDefaultPath((settings.defaultPath = folder));
+				}}
+			/>
+			<LunaButtonSetting
+				title="Choose quarantine folder"
+				desc={
+					<>
+						Where replaced and unfavorited files go, under their path in the library. Never indexed, never deleted by the plugin.
+						<br />
+						{quarantineFolder ? <>Using {quarantineFolder}</> : <>Default: {defaultPath ? `${defaultPath}\\` : "<Library root>\\"}_SongDownloader_Quarantine</>}
+					</>
+				}
+				sx={{ whiteSpace: "nowrap", flexShrink: 0, minWidth: "max-content" }}
+				children="Change folder"
+				onClick={async () => {
+					// Cancelling the folder dialog keeps the current folder.
+					const folder = await getDownloadFolder();
+					if (folder === undefined) return;
+					setIndexQuarantineFolder(folder);
+					setQuarantineFolder((settings.quarantineFolder = folder));
 				}}
 			/>
 			<FormatSetting
