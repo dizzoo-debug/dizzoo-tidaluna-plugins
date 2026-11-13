@@ -26,8 +26,11 @@ const getArtistReleases = (artistId: string | number) => {
 			const compilations = section(/^compilations?$/i);
 			const compilationIds = new Set((compilations?.items ?? []).map((item) => String(albumOf(item).id)));
 			const total = compilations?.totalNumberOfItems ?? compilationIds.size;
-			for (let offset = compilationIds.size; compilations?.dataApiPath && offset < total && offset < 500; offset += 50) {
-				const more = await TidalApi.fetch<PagedList>(`https://desktop.tidal.com/v1/${compilations.dataApiPath}?limit=50&offset=${offset}&${TidalApi.queryArgs()}`);
+			// dataApiPath already carries a query ("pages/data/<id>?artistId=…"); a second "?" gets a 400.
+			const path = compilations?.dataApiPath;
+			const joiner = path?.includes("?") ? "&" : "?";
+			for (let offset = compilationIds.size; path && offset < total && offset < 500; offset += 50) {
+				const more = await TidalApi.fetch<PagedList>(`https://desktop.tidal.com/v1/${path}${joiner}limit=50&offset=${offset}&${TidalApi.queryArgs()}`);
 				const items = more?.items ?? [];
 				for (const item of items) compilationIds.add(String(albumOf(item).id));
 				if (items.length === 0) break;
